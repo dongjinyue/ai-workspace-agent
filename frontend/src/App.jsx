@@ -1,49 +1,88 @@
 import { useState } from "react";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
 function App() {
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-  async function callBackend() {
+  async function sendMessage() {
+    if (!question.trim()) {
+      setError("请输入问题");
+      return;
+    }
+
     setLoading(true);
-    setMessage("");
+    setAnswer("");
     setError("");
 
     try {
-      if (!API_BASE_URL) {
-        throw new Error("缺少 VITE_API_BASE_URL 环境变量");
-      }
-
-      const response = await fetch(`${API_BASE_URL}/api/health`);
-
-      if (!response.ok) {
-        throw new Error(`后端请求失败（HTTP ${response.status}）`);
-      }
+      const response = await fetch(
+        `${API_BASE_URL}/api/chat`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message: question,
+          }),
+        }
+      );
 
       const data = await response.json();
 
-      setMessage(data.message);
+      if (!response.ok) {
+        throw new Error(data.detail || "请求失败");
+      }
+
+      setAnswer(data.answer);
     } catch (requestError) {
-      setError(requestError.message || "无法连接后端，请稍后重试");
+      setError(requestError.message);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div>
+    <main>
       <h1>AI Workspace Agent</h1>
 
-      <button onClick={callBackend} disabled={loading}>
-        {loading ? "加载中..." : "测试后端"}
-      </button>
+      <textarea
+        value={question}
+        onChange={(event) => setQuestion(event.target.value)}
+        placeholder="请输入你的问题"
+        rows="5"
+        maxLength={4000}
+      />
 
-      <p>{message}</p>
-      {error && <p role="alert">{error}</p>}
-    </div>
+      <div>
+        <button
+          onClick={sendMessage}
+          disabled={loading}
+        >
+          {loading ? "正在思考……" : "发送"}
+        </button>
+      </div>
+
+      {error && (
+        <p style={{ color: "red" }}>
+          {error}
+        </p>
+      )}
+
+      {answer && (
+        <section>
+          <h2>模型回答</h2>
+          <p style={{ whiteSpace: "pre-wrap" }}>
+            {answer}
+          </p>
+        </section>
+      )}
+    </main>
   );
 }
 
