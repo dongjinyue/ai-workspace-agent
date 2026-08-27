@@ -14,6 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.agent.service import run_agent
 from app.rag.service import index_document, semantic_search
+from app.security import PromptInjectionError
 
 app = FastAPI()
 
@@ -105,6 +106,7 @@ def chat(request: ChatRequest):
                 "tool_name": result.tool_name,
                 "steps": result.steps,
                 "tools_used": result.tools_used,
+                "active_skill": result.active_skill,
             },
         }
 
@@ -144,6 +146,8 @@ async def upload_document(file: UploadFile = File(...)):
             knowledge_base_id,
             text,
         )
+    except PromptInjectionError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     except RuntimeError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 

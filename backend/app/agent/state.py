@@ -6,6 +6,7 @@ class AgentState(TypedDict):
 
     messages: list[Any]
     knowledge_base_id: str | None
+    active_skill: str | None
     steps: int
     tools_used: list[str]
     matched_chunks: int

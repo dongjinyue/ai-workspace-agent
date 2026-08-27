@@ -113,3 +113,4 @@ websockets==17.0.1
 xxhash==4.0.1
 yarl==1.24.5
 zstandard==0.25.0
+pytest==8.4.2

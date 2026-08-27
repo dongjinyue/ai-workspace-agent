@@ -169,9 +169,12 @@ function App() {
           {agentInfo && (
             <div>
               <h3>Agent 执行信息</h3>
+              <p>Skill：{agentInfo.active_skill || "无"}</p>
               <p>
-                使用工具：
-                {agentInfo.tool_called ? agentInfo.tool_name : "未使用工具"}
+                Tools：
+                {agentInfo.tools_used?.length
+                  ? agentInfo.tools_used.join(", ")
+                  : "无"}
               </p>
               <p>执行步骤：{agentInfo.steps}</p>
             </div>

@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from app.agent.state import AgentState
 from app.agent.tools import AGENT_TOOL_SCHEMAS
+from app.skills.registry import get_skill
 
 
 MAX_STEPS = 5
@@ -50,10 +51,27 @@ def agent_node(state: AgentState) -> dict[str, Any]:
             "final_answer": "Agent 已达到最大执行步数，工作流已安全停止。",
         }
 
+    skill = None
+    system_prompt = SYSTEM_PROMPT
+    available_tools = AGENT_TOOL_SCHEMAS
+    if state["active_skill"]:
+        skill = get_skill(state["active_skill"])
+        if skill is None:
+            raise ValueError(f"未注册的技能：{state['active_skill']}")
+        system_prompt = f"{SYSTEM_PROMPT}\n\n{skill.instructions}"
+        available_tools = [
+            schema
+            for schema in AGENT_TOOL_SCHEMAS
+            if schema["function"]["name"] in skill.allowed_tools
+        ]
+
     response = _client().chat.completions.create(
         model=os.getenv("QWEN_MODEL", "qwen-max"),
-        messages=state["messages"],
-        tools=AGENT_TOOL_SCHEMAS,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            *state["messages"],
+        ],
+        tools=available_tools,
         tool_choice="auto",
         parallel_tool_calls=False,
         extra_body={"enable_thinking": False},
@@ -82,10 +100,17 @@ def tool_node(state: AgentState) -> dict[str, Any]:
 
     tool_call = tool_calls[0]
     tool_name = tool_call.function.name
+    allowed_tools = None
+    if state["active_skill"]:
+        skill = get_skill(state["active_skill"])
+        if skill is None:
+            raise ValueError(f"未注册的技能：{state['active_skill']}")
+        allowed_tools = skill.allowed_tools
     result = execute_tool(
         tool_name,
         tool_call.function.arguments,
         state["knowledge_base_id"],
+        allowed_tools=allowed_tools,
     )
     messages = [
         *state["messages"],
