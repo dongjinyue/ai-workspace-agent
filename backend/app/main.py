@@ -104,6 +104,7 @@ def chat(request: ChatRequest):
                 "tool_called": result.tool_called,
                 "tool_name": result.tool_name,
                 "steps": result.steps,
+                "tools_used": result.tools_used,
             },
         }
 
