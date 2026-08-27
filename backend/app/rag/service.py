@@ -1,4 +1,8 @@
+import os
 import re
+
+from app.rag.embeddings import embed_texts
+from app.rag.vector_store import SearchMatch, add_chunks, find_collection, search_chunks
 
 
 def split_text(
@@ -17,50 +21,56 @@ def split_text(
 
     chunks = []
     step = chunk_size - overlap
-    for start in range(0, len(cleaned_text), step):
-        chunk = cleaned_text[start : start + chunk_size].strip()
-        if chunk:
-            chunks.append(chunk)
-        if start + chunk_size >= len(cleaned_text):
-            break
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", cleaned_text)
+        if paragraph.strip()
+    ]
+
+    for paragraph in paragraphs:
+        if len(paragraph) <= chunk_size:
+            chunks.append(paragraph)
+            continue
+
+        for start in range(0, len(paragraph), step):
+            chunk = paragraph[start : start + chunk_size].strip()
+            if chunk:
+                chunks.append(chunk)
+            if start + chunk_size >= len(paragraph):
+                break
 
     return chunks
 
 
-def _search_terms(text: str) -> set[str]:
-    """提取英文单词、数字和中文二元片段，支持简单中文检索。"""
-    normalized = text.lower()
-    terms = set(re.findall(r"[a-z0-9]+", normalized))
+def index_document(
+    knowledge_base_id: str,
+    text: str,
+) -> int:
+    """切分文档、批量向量化并持久化到指定知识库。"""
+    chunks = split_text(text)
+    if not chunks:
+        return 0
 
-    for sequence in re.findall(r"[\u4e00-\u9fff]+", normalized):
-        if len(sequence) == 1:
-            terms.add(sequence)
-        else:
-            terms.update(sequence[index : index + 2] for index in range(len(sequence) - 1))
-
-    return terms
+    embeddings = embed_texts(chunks, text_type="document")
+    add_chunks(knowledge_base_id, chunks, embeddings)
+    return len(chunks)
 
 
-def retrieve_chunks(
-    chunks: list[str],
+def semantic_search(
+    knowledge_base_id: str,
     query: str,
+    *,
     top_k: int = 3,
-) -> list[str]:
-    query_terms = _search_terms(query)
-    if not query_terms:
+) -> list[SearchMatch]:
+    """向量化用户问题，并过滤超过距离阈值的不可信结果。"""
+    if not query.strip() or find_collection(knowledge_base_id) is None:
         return []
 
-    scored_chunks = []
-
-    for chunk in chunks:
-        chunk_terms = _search_terms(chunk)
-        score = len(query_terms & chunk_terms)
-        scored_chunks.append((score, chunk))
-
-    scored_chunks.sort(key=lambda item: item[0], reverse=True)
-
-    return [
-        chunk
-        for score, chunk in scored_chunks[:top_k]
-        if score > 0
-    ]
+    max_distance = float(os.getenv("RAG_MAX_COSINE_DISTANCE", "0.45"))
+    query_embedding = embed_texts([query], text_type="query")[0]
+    return search_chunks(
+        knowledge_base_id,
+        query_embedding,
+        top_k=top_k,
+        max_distance=max_distance,
+    )

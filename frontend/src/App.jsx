@@ -11,7 +11,24 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [documentStatus, setDocumentStatus] = useState("尚未上传知识库文件");
   const [matchedChunks, setMatchedChunks] = useState(0);
-  const [knowledgeBaseId, setKnowledgeBaseId] = useState("");
+  const [llmCalled, setLlmCalled] = useState(false);
+  const [agentInfo, setAgentInfo] = useState(null);
+  const [knowledgeBaseId, setKnowledgeBaseId] = useState(
+    () => localStorage.getItem("knowledge_base_id") || "",
+  );
+
+  function updateKnowledgeBaseId(value) {
+    const normalizedValue = value.trim();
+    setKnowledgeBaseId(normalizedValue);
+
+    if (normalizedValue) {
+      localStorage.setItem("knowledge_base_id", normalizedValue);
+      setDocumentStatus("已连接到持久化知识库");
+    } else {
+      localStorage.removeItem("knowledge_base_id");
+      setDocumentStatus("尚未上传知识库文件");
+    }
+  }
 
   async function uploadDocument(event) {
     const file = event.target.files?.[0];
@@ -40,7 +57,7 @@ function App() {
         throw new Error(data.detail || "文档上传失败");
       }
 
-      setKnowledgeBaseId(data.knowledge_base_id);
+      updateKnowledgeBaseId(data.knowledge_base_id);
       setDocumentStatus(`已加载 ${data.filename}，共 ${data.chunks} 个文本块`);
     } catch (uploadError) {
       setDocumentStatus("知识库文件上传失败");
@@ -60,6 +77,8 @@ function App() {
     setLoading(true);
     setAnswer("");
     setMatchedChunks(0);
+    setLlmCalled(false);
+    setAgentInfo(null);
     setError("");
 
     try {
@@ -85,6 +104,8 @@ function App() {
 
       setAnswer(data.answer);
       setMatchedChunks(data.matched_chunks || 0);
+      setLlmCalled(Boolean(data.llm_called));
+      setAgentInfo(data.agent || null);
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -105,6 +126,16 @@ function App() {
           disabled={uploading}
         />
         <p>{uploading ? "正在上传并处理……" : documentStatus}</p>
+        <label>
+          知识库 ID
+          <input
+            type="text"
+            value={knowledgeBaseId}
+            onChange={(event) => updateKnowledgeBaseId(event.target.value)}
+            placeholder="上传后自动生成，也可以粘贴已有 ID"
+            maxLength={64}
+          />
+        </label>
       </section>
 
       <textarea
@@ -134,6 +165,17 @@ function App() {
         <section>
           <h2>模型回答</h2>
           <small>本次回答匹配到 {matchedChunks} 个知识片段</small>
+          <small> · {llmCalled ? "已调用 LLM" : "未调用 LLM"}</small>
+          {agentInfo && (
+            <div>
+              <h3>Agent 执行信息</h3>
+              <p>
+                使用工具：
+                {agentInfo.tool_called ? agentInfo.tool_name : "未使用工具"}
+              </p>
+              <p>执行步骤：{agentInfo.steps}</p>
+            </div>
+          )}
           <p style={{ whiteSpace: "pre-wrap" }}>
             {answer}
           </p>
