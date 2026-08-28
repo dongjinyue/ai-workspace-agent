@@ -11,6 +11,9 @@ from app.agent.service import (
 from app.mcp.client import MCPClient, MCPClientError
 
 
+pytestmark = pytest.mark.integration
+
+
 def test_mcp_server_environment_does_not_inherit_backend_secrets():
     with patch.dict(
         "os.environ",

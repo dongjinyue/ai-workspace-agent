@@ -12,11 +12,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from app.agent.service import run_agent
+from app.memory.database import init_database
+from app.memory.service import ConversationNotFoundError, ConversationService
+from app.observability import configure_logging
 from app.rag.service import index_document, semantic_search
 from app.security import PromptInjectionError
 
+configure_logging()
 app = FastAPI()
+init_database()
+conversation_service = ConversationService()
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,6 +42,10 @@ class ChatRequest(BaseModel):
         min_length=1,
         max_length=64,
         pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{32}$",
     )
 
 
@@ -93,11 +102,16 @@ def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="消息不能为空")
 
     try:
-        result = run_agent(
+        turn = conversation_service.chat(
             message=message,
             knowledge_base_id=request.knowledge_base_id,
+            conversation_id=request.conversation_id,
         )
+        result = turn.agent
         return {
+            "conversation_id": turn.conversation_id,
+            "history_messages": turn.history_messages,
+            "trace": turn.trace.to_dict(),
             "answer": result.answer,
             "matched_chunks": result.matched_chunks,
             "llm_called": result.llm_called,
@@ -112,12 +126,32 @@ def chat(request: ChatRequest):
             },
         }
 
+    except ConversationNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
     except Exception as error:
-        print(f"Agent 执行失败：{type(error).__name__}: {error}")
         raise HTTPException(
             status_code=502,
             detail="Agent 执行失败，请检查模型、工具参数和后端日志",
         ) from error
+
+
+@app.get("/api/conversations/{conversation_id}/messages")
+def get_conversation_messages(conversation_id: str):
+    if len(conversation_id) != 32 or any(
+        character not in "0123456789abcdef" for character in conversation_id
+    ):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        messages = conversation_service.get_history(conversation_id)
+    except ConversationNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {
+        "conversation_id": conversation_id,
+        "messages": [
+            {"role": item["role"], "content": item["content"]}
+            for item in messages
+        ],
+    }
 
 
 @app.post("/api/documents/upload")

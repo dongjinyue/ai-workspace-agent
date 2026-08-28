@@ -97,6 +97,9 @@ class AgentResult:
     active_skill: str | None
     steps: int
     matched_chunks: int
+    tool_traces: list[dict[str, Any]] | None = None
+    llm_calls: int = 0
+    llm_duration_ms: float = 0.0
     tool_source: str | None = None
     mcp_server: str | None = None
     llm_called: bool = True
@@ -210,7 +213,13 @@ def _ground_policy_summary(answer: str, chunks: list[str]) -> str:
     return "\n".join(output)
 
 
-def run_agent(message: str, knowledge_base_id: str | None) -> AgentResult:
+def run_agent(
+    message: str,
+    knowledge_base_id: str | None,
+    *,
+    conversation_id: str | None = None,
+    history_messages: list[dict[str, str]] | None = None,
+) -> AgentResult:
     """从 START 开始调用已编译的 LangGraph 工作流。"""
     from app.agent.graph import agent_graph
     from app.skills.registry import select_skill
@@ -219,9 +228,10 @@ def run_agent(message: str, knowledge_base_id: str | None) -> AgentResult:
 
     result = agent_graph.invoke(
         {
-            "messages": [
-                {"role": "user", "content": message},
-            ],
+            "messages": history_messages
+            if history_messages is not None
+            else [{"role": "user", "content": message}],
+            "conversation_id": conversation_id,
             "knowledge_base_id": knowledge_base_id,
             "active_skill": skill.name if skill else None,
             "steps": 0,
@@ -229,6 +239,9 @@ def run_agent(message: str, knowledge_base_id: str | None) -> AgentResult:
             "matched_chunks": 0,
             "retrieved_chunks": [],
             "final_answer": None,
+            "tool_traces": [],
+            "llm_calls": 0,
+            "llm_duration_ms": 0.0,
         }
     )
     answer = result.get("final_answer") or _message_content(result["messages"][-1])
@@ -251,6 +264,9 @@ def run_agent(message: str, knowledge_base_id: str | None) -> AgentResult:
         active_skill=result["active_skill"],
         steps=result["steps"],
         matched_chunks=result["matched_chunks"],
+        tool_traces=result.get("tool_traces", []),
+        llm_calls=result.get("llm_calls", 0),
+        llm_duration_ms=result.get("llm_duration_ms", 0.0),
         tool_source=last_registration.source if last_registration else None,
         mcp_server=(
             last_registration.server

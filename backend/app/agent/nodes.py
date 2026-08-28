@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+from time import perf_counter
 from typing import Any
 
 from openai import OpenAI
@@ -8,6 +10,8 @@ from app.agent.state import AgentState
 from app.agent.service import get_agent_tool_schemas
 from app.skills.registry import get_skill
 
+
+logger = logging.getLogger(__name__)
 
 MAX_STEPS = 5
 NO_KNOWLEDGE_ANSWER = "当前知识库中没有找到相关信息。"
@@ -69,17 +73,24 @@ def agent_node(state: AgentState) -> dict[str, Any]:
             if schema["function"]["name"] in skill.allowed_tools
         ]
 
-    response = _client().chat.completions.create(
-        model=os.getenv("QWEN_MODEL", "qwen-max"),
-        messages=[
-            {"role": "system", "content": system_prompt},
-            *state["messages"],
-        ],
-        tools=available_tools,
-        tool_choice="auto",
-        parallel_tool_calls=False,
-        extra_body={"enable_thinking": False},
-    )
+    # perf_counter 使用单调高精度时钟，适合测耗时，不受系统时间调整影响。
+    llm_started = perf_counter()
+    try:
+        response = _client().chat.completions.create(
+            model=os.getenv("QWEN_MODEL", "qwen-max"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                *state["messages"],
+            ],
+            tools=available_tools,
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            extra_body={"enable_thinking": False},
+        )
+    except Exception as error:
+        logger.error("LLM call failed error_type=%s", type(error).__name__)
+        raise
+    llm_duration_ms = (perf_counter() - llm_started) * 1000
     message = response.choices[0].message
     if not message.content and not message.tool_calls:
         raise RuntimeError("模型没有返回回答或工具调用")
@@ -87,6 +98,10 @@ def agent_node(state: AgentState) -> dict[str, Any]:
     update: dict[str, Any] = {
         "messages": [*state["messages"], message],
         "steps": state["steps"] + 1,
+        "llm_calls": state.get("llm_calls", 0) + 1,
+        "llm_duration_ms": round(
+            state.get("llm_duration_ms", 0.0) + llm_duration_ms, 3
+        ),
     }
     if message.tool_calls and update["steps"] >= MAX_STEPS:
         update["final_answer"] = "Agent 已达到最大执行步数，工作流已安全停止。"
@@ -110,12 +125,34 @@ def tool_node(state: AgentState) -> dict[str, Any]:
         if skill is None:
             raise ValueError(f"未注册的技能：{state['active_skill']}")
         allowed_tools = skill.allowed_tools
-    result = execute_tool(
-        tool_name,
-        tool_call.function.arguments,
-        state["knowledge_base_id"],
-        allowed_tools=allowed_tools,
-    )
+    # Tool（工具）单独计时，便于区分模型慢、检索慢或 MCP 慢。
+    tool_started = perf_counter()
+    try:
+        result = execute_tool(
+            tool_name,
+            tool_call.function.arguments,
+            state["knowledge_base_id"],
+            allowed_tools=allowed_tools,
+        )
+    except Exception as error:
+        logger.error(
+            "Tool execution failed tool=%s error_type=%s",
+            tool_name,
+            type(error).__name__,
+        )
+        raise
+    tool_duration_ms = (perf_counter() - tool_started) * 1000
+    from app.agent.service import TOOLS
+
+    registration = TOOLS.get(tool_name)
+    # Trace 只保存工具元数据，不保存参数和结果，避免泄露用户或文档内容。
+    tool_trace = {
+        "name": tool_name,
+        "source": registration.source if registration else "unknown",
+        "duration_ms": round(tool_duration_ms, 3),
+    }
+    if registration and registration.server:
+        tool_trace["server"] = registration.server
     messages = [
         *state["messages"],
         {
@@ -141,6 +178,7 @@ def tool_node(state: AgentState) -> dict[str, Any]:
         "matched_chunks": matched_chunks,
         "retrieved_chunks": result.get("chunks", []),
         "final_answer": final_answer,
+        "tool_traces": [*state.get("tool_traces", []), tool_trace],
     }
 
 

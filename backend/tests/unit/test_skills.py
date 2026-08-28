@@ -10,6 +10,9 @@ from app.security import PromptInjectionError
 from app.skills.registry import get_skill, select_skill
 
 
+pytestmark = pytest.mark.unit
+
+
 def _state(active_skill: str | None) -> dict:
     return {
         "messages": [{"role": "user", "content": "请总结公司退款政策"}],

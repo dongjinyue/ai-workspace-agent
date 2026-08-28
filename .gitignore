@@ -22,6 +22,10 @@ dist/
 # Local persistent vector database
 backend/data/chroma/
 
+# Local SQLite conversation database
+backend/data/app.db
+backend/data/app.db-*
+
 # Operating system files
 .DS_Store
 Thumbs.db
