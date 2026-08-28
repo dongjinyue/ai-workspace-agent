@@ -107,6 +107,8 @@ def chat(request: ChatRequest):
                 "steps": result.steps,
                 "tools_used": result.tools_used,
                 "active_skill": result.active_skill,
+                "tool_source": result.tool_source,
+                "mcp_server": result.mcp_server,
             },
         }
 

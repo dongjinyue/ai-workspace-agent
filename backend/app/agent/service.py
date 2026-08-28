@@ -1,10 +1,17 @@
 import json
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable, Literal
 
+from jsonschema import ValidationError, validate
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.agent.tools import calculator_tool, search_knowledge_base_tool
+from app.agent.tools import (
+    AGENT_TOOL_SCHEMAS,
+    calculator_tool,
+    search_knowledge_base_tool,
+)
+from app.mcp.client import MCPClient, MCPClientError
 from app.security import PROMPT_INJECTION_MARKERS
 
 
@@ -22,9 +29,12 @@ class CalculatorArguments(BaseModel):
 
 @dataclass(frozen=True)
 class ToolRegistration:
-    function: Callable[..., dict]
-    arguments_model: type[BaseModel]
+    function: Callable[..., dict] | None
+    arguments_model: type[BaseModel] | None
     needs_knowledge_base: bool = False
+    source: Literal["local", "mcp"] = "local"
+    server: str | None = None
+    input_schema: dict[str, Any] | None = None
 
 
 TOOLS = {
@@ -36,6 +46,47 @@ TOOLS = {
     "calculator": ToolRegistration(calculator_tool, CalculatorArguments),
 }
 
+ALLOWED_MCP_TOOLS = frozenset({"get_current_time", "calculate_text_stats"})
+
+
+@lru_cache(maxsize=1)
+def discover_mcp_tools() -> tuple[dict[str, Any], ...]:
+    """发现 Server 工具，只注册 Host Allowlist（宿主允许列表）中的名称。"""
+    discovered = MCPClient().list_tools_sync()
+    schemas: list[dict[str, Any]] = []
+    for tool in discovered:
+        name = tool["name"]
+        if name not in ALLOWED_MCP_TOOLS:
+            continue
+        input_schema = tool["input_schema"]
+        TOOLS[name] = ToolRegistration(
+            function=None,
+            arguments_model=None,
+            source="mcp",
+            server="workspace",
+            input_schema=input_schema,
+        )
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": tool["description"],
+                    "parameters": input_schema,
+                },
+            }
+        )
+    return tuple(schemas)
+
+
+def get_agent_tool_schemas() -> list[dict[str, Any]]:
+    """合并本地工具与经过允许列表过滤的 MCP 工具。"""
+    try:
+        return [*AGENT_TOOL_SCHEMAS, *discover_mcp_tools()]
+    except MCPClientError:
+        # MCP 故障不应拖垮原有本地工具，且不得把内部堆栈暴露给浏览器。
+        return list(AGENT_TOOL_SCHEMAS)
+
 
 @dataclass(frozen=True)
 class AgentResult:
@@ -46,6 +97,8 @@ class AgentResult:
     active_skill: str | None
     steps: int
     matched_chunks: int
+    tool_source: str | None = None
+    mcp_server: str | None = None
     llm_called: bool = True
 
 
@@ -69,6 +122,25 @@ def execute_tool(
     if not isinstance(decoded, dict):
         raise ValueError("工具参数必须是 JSON 对象")
 
+    if registration.source == "mcp":
+        if tool_name not in ALLOWED_MCP_TOOLS or registration.input_schema is None:
+            raise ValueError(f"不允许调用 MCP 工具：{tool_name}")
+        try:
+            validate(instance=decoded, schema=registration.input_schema)
+        except ValidationError as error:
+            raise ValueError("MCP 工具参数不符合 JSON Schema") from error
+        try:
+            value = MCPClient().call_tool_sync(tool_name, decoded)
+        except MCPClientError as error:
+            raise RuntimeError("MCP 工具当前不可用") from error
+        return {
+            "source": "mcp",
+            "server": registration.server,
+            "untrusted_data": value,
+        }
+
+    if registration.arguments_model is None or registration.function is None:
+        raise RuntimeError("本地工具注册不完整")
     validated = registration.arguments_model.model_validate(decoded)
     arguments: dict[str, Any] = validated.model_dump()
     if registration.needs_knowledge_base:
@@ -164,6 +236,7 @@ def run_agent(message: str, knowledge_base_id: str | None) -> AgentResult:
         raise RuntimeError("工作流没有生成最终回答")
 
     tools_used = result["tools_used"]
+    last_registration = TOOLS.get(tools_used[-1]) if tools_used else None
     if tools_used and tools_used[-1] == "search_knowledge_base":
         source_text = "\n\n".join(result["retrieved_chunks"])
         if result["active_skill"] == "policy_summary" and source_text:
@@ -178,4 +251,10 @@ def run_agent(message: str, knowledge_base_id: str | None) -> AgentResult:
         active_skill=result["active_skill"],
         steps=result["steps"],
         matched_chunks=result["matched_chunks"],
+        tool_source=last_registration.source if last_registration else None,
+        mcp_server=(
+            last_registration.server
+            if last_registration and last_registration.source == "mcp"
+            else None
+        ),
     )
