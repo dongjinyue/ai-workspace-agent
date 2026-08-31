@@ -8,6 +8,7 @@ class RequestTrace:
     # request_id 标识一次请求；conversation_id 属于会话，因此不在这里混用。
     request_id: str
     started_at: str
+    completed_at: str
     duration_ms: float
     steps: int
     skill: str | None

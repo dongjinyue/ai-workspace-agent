@@ -1,0 +1,150 @@
+.message-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 22px;
+  padding: 0 3px 6px;
+  color: #929bad;
+  font-size: 10px;
+}
+
+.message-meta time {
+  color: #a2aaba;
+  white-space: nowrap;
+}
+
+.user .message-meta {
+  flex-direction: row-reverse;
+}
+
+.execution-trace {
+  margin-bottom: 8px;
+  border: 1px solid #e4e8f0;
+  border-radius: 12px;
+  background: #fff;
+  color: #586276;
+  overflow: hidden;
+}
+
+.execution-trace summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 13px;
+  list-style: none;
+  color: #697386;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.execution-trace summary::-webkit-details-marker {
+  display: none;
+}
+
+.execution-trace summary > span {
+  color: #6866dc;
+  font-size: 15px;
+}
+
+.execution-trace summary b {
+  margin-left: auto;
+  font-size: 12px;
+  transition: transform 0.2s;
+}
+
+.execution-trace[open] summary b {
+  transform: rotate(180deg);
+}
+
+.trace-panel {
+  padding: 0 13px 13px;
+  border-top: 1px solid #edf0f5;
+}
+
+.trace-note {
+  margin: 10px 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f7f7fe;
+  color: #858da0;
+  font-size: 10px;
+}
+
+.trace-panel ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trace-panel li {
+  position: relative;
+  display: flex;
+  gap: 9px;
+  padding-bottom: 12px;
+}
+
+.trace-panel li:not(:last-child)::after {
+  position: absolute;
+  top: 19px;
+  bottom: 2px;
+  left: 9px;
+  width: 1px;
+  background: #e1e5ed;
+  content: "";
+}
+
+.trace-panel li i {
+  z-index: 1;
+  flex: 0 0 19px;
+  height: 19px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #eeefff;
+  color: #5b5bd6;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.trace-panel li div {
+  display: flex;
+  flex-direction: column;
+}
+
+.trace-panel li strong {
+  color: #465066;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.trace-panel li small {
+  margin-top: 2px;
+  color: #9ba3b2;
+  font-size: 9px;
+}
+
+.trace-total {
+  display: flex;
+  justify-content: space-between;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f4f5f9;
+  font-size: 10px;
+}
+
+.trace-total strong {
+  color: #5b5bd6;
+}
+
+@media (max-width: 720px) {
+  .message-meta {
+    gap: 8px;
+  }
+
+  .message-meta time {
+    font-size: 9px;
+  }
+}

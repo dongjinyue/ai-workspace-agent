@@ -77,7 +77,6 @@ class ConversationService:
                     for item in history
                 ],
             )
-            repository.save_message(resolved_id, "assistant", agent_result.answer)
         except Exception as error:
             # 日志只记录不可逆推出正文的标识和错误类型，不记录用户消息或密钥。
             logger.error(
@@ -93,6 +92,7 @@ class ConversationService:
         trace = RequestTrace(
             request_id=request_id,
             started_at=started_at,
+            completed_at=datetime.now(timezone.utc).isoformat(),
             duration_ms=duration_ms,
             steps=agent_result.steps,
             skill=agent_result.active_skill,
@@ -103,6 +103,11 @@ class ConversationService:
             },
             llm_calls=agent_result.llm_calls,
             llm_duration_ms=agent_result.llm_duration_ms,
+        )
+        repository.save_assistant_message_with_trace(
+            resolved_id,
+            agent_result.answer,
+            trace.to_dict(),
         )
         logger.info(
             "Agent request completed request_id=%s conversation_id=%s duration_ms=%.3f",
@@ -121,3 +126,8 @@ class ConversationService:
         if not repository.conversation_exists(conversation_id):
             raise ConversationNotFoundError("会话不存在")
         return repository.get_messages(conversation_id)
+
+    def get_history_with_traces(self, conversation_id: str) -> list[dict]:
+        if not repository.conversation_exists(conversation_id):
+            raise ConversationNotFoundError("会话不存在")
+        return repository.get_messages_with_traces(conversation_id)

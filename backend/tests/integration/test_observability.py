@@ -34,9 +34,20 @@ def test_chat_returns_safe_structured_trace():
     assert response.status_code == 200
     trace = response.json()["trace"]
     assert len(trace["request_id"]) == 32
+    assert trace["completed_at"] >= trace["started_at"]
     assert trace["duration_ms"] >= trace["llm_duration_ms"]
     assert trace["steps"] == 3
     assert trace["tools"][0]["name"] == "calculator"
     assert trace["rag"] == {"hit": False, "results": 0}
     assert "message" not in trace
     assert "api_key" not in str(trace).lower()
+
+    # 执行轨迹存入独立审计表，刷新页面后仍可随助手消息恢复。
+    conversation_id = response.json()["conversation_id"]
+    restored = TestClient(app).get(
+        f"/api/conversations/{conversation_id}/messages"
+    )
+    assistant_message = restored.json()["messages"][-1]
+    assert assistant_message["role"] == "assistant"
+    assert assistant_message["trace"]["request_id"] == trace["request_id"]
+    assert assistant_message["trace"]["tools"][0]["name"] == "calculator"

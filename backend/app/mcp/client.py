@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ from mcp.client.stdio import stdio_client
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 WORKSPACE_SERVER = BACKEND_DIR / "mcp_servers" / "workspace_server.py"
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 MCP_ENV_ALLOWLIST = (
     "PATH",
@@ -50,8 +52,13 @@ class MCPClient:
     """通过 stdio（标准输入输出）启动并访问 workspace MCP Server。"""
 
     def __init__(self, timeout_seconds: float = 10.0) -> None:
+        if timeout_seconds <= 0 or timeout_seconds > 60:
+            raise ValueError("MCP 超时时间必须大于 0 且不超过 60 秒")
+        if not WORKSPACE_SERVER.is_file():
+            raise MCPClientError("workspace MCP Server 当前不可用")
         self.timeout_seconds = timeout_seconds
         self.server = StdioServerParameters(
+            # 使用当前 Python 解释器和参数数组启动，不经过 Shell（命令解释器）。
             command=sys.executable,
             args=[str(WORKSPACE_SERVER)],
             cwd=BACKEND_DIR,
@@ -64,14 +71,26 @@ class MCPClient:
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 async with stdio_client(self.server) as (read, write):
-                    async with ClientSession(read, write) as session:
+                    async with ClientSession(
+                        read,
+                        write,
+                        read_timeout_seconds=self.timeout_seconds,
+                    ) as session:
                         await session.initialize()
                         if operation == "list_tools":
                             return await session.list_tools()
-                        return await session.call_tool(
-                            kwargs["name"], kwargs.get("arguments", {})
-                        )
+                        if operation == "call_tool":
+                            return await session.call_tool(
+                                kwargs["name"], kwargs.get("arguments", {})
+                            )
+                        raise ValueError("不支持的 MCP 操作")
         except Exception as error:
+            # 日志只记录异常类型，不记录工具参数、文档内容或密钥。
+            logger.warning(
+                "MCP operation failed operation=%s error_type=%s",
+                operation,
+                type(error).__name__,
+            )
             raise MCPClientError("workspace MCP Server 当前不可用") from error
 
     async def list_tools(self) -> list[dict[str, Any]]:

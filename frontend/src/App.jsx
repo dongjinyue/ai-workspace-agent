@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import "./ModeSwitch.css";
+import "./ExecutionTrace.css";
 
 const API = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 async function request(path, options) {
@@ -9,6 +10,40 @@ async function request(path, options) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || "请求失败，请稍后重试");
   return data;
+}
+
+function formatTime(value) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
+}
+
+function formatDuration(milliseconds) {
+  if (milliseconds == null) return "";
+  return milliseconds < 1000
+    ? `${Math.round(milliseconds)} 毫秒`
+    : `${(milliseconds / 1000).toFixed(1)} 秒`;
+}
+
+function ExecutionTrace({ trace }) {
+  if (!trace) return null;
+  const tools = trace.tools || [];
+  return <details className="execution-trace">
+    <summary><span>⌁</span> 查看工作过程 <b>⌄</b></summary>
+    <div className="trace-panel">
+      <p className="trace-note">这里展示执行轨迹，不包含模型的隐藏思维链。</p>
+      <ol>
+        <li><i>1</i><div><strong>理解并规划任务</strong><small>Agent 共执行 {trace.steps} 个步骤</small></div></li>
+        {tools.map((tool, index) => <li key={`${tool.name}-${index}`}><i>{index + 2}</i><div><strong>调用工具 · {tool.name}</strong><small>{tool.source === "mcp" ? `MCP 服务${tool.server ? ` · ${tool.server}` : ""}` : "本地安全工具"} · {formatDuration(tool.duration_ms)}</small></div></li>)}
+        {trace.rag?.hit && <li><i>{tools.length + 2}</i><div><strong>检索企业知识库</strong><small>命中 {trace.rag.results} 个相关片段</small></div></li>}
+        <li><i>✓</i><div><strong>生成并检查回答</strong><small>模型调用 {trace.llm_calls} 次 · 模型耗时 {formatDuration(trace.llm_duration_ms)}</small></div></li>
+      </ol>
+      <div className="trace-total"><span>总耗时</span><strong>{formatDuration(trace.duration_ms)}</strong></div>
+    </div>
+  </details>;
 }
 
 function App() {
@@ -86,13 +121,13 @@ function App() {
     const content = question.trim();
     if (!content || loading) return;
     setQuestion(""); setError(""); setLoading(true);
-    setMessages((items) => [...items, { role: "user", content }]);
+    setMessages((items) => [...items, { role: "user", content, created_at: new Date().toISOString() }]);
     try {
       const endpoint = agentMode ? "/api/agent/chat" : "/api/chat";
       const data = await request(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, conversation_id: conversationId || null, knowledge_base_id: knowledgeBaseId || null }) });
       setConversationId(data.conversation_id);
       localStorage.setItem("conversation_id", data.conversation_id);
-      setMessages((items) => [...items, { role: "assistant", content: data.answer }]);
+      setMessages((items) => [...items, { role: "assistant", content: data.answer, created_at: data.trace?.completed_at, trace: data.trace }]);
       await refresh(data.conversation_id);
     } catch (e) {
       setMessages((items) => items.slice(0, -1)); setQuestion(content); setError(e.message);
@@ -136,7 +171,7 @@ function App() {
         {!messages.length && <div className="welcome"><span>✦</span><h2>有什么可以帮你？</h2><p>你可以询问工作问题，也可以上传企业文档，让我结合知识库回答。</p></div>}
         {messages.map((message, index) => <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
           {message.role === "assistant" && <div className="avatar ai">AI</div>}
-          <div className="message-content"><small>{message.role === "assistant" ? "AI 助手" : "你"}</small><div className="bubble">{message.content}</div></div>
+          <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(message.trace?.completed_at || message.created_at)}{message.trace?.duration_ms != null ? ` · 用时 ${formatDuration(message.trace.duration_ms)}` : ""}</time></div>{message.role === "assistant" && <ExecutionTrace trace={message.trace} />}<div className="bubble">{message.content}</div></div>
           {message.role === "user" && <div className="avatar user">你</div>}
         </article>)}
         {loading && <article className="message assistant"><div className="avatar ai">AI</div><div className="typing"><i /><i /><i /></div></article>}

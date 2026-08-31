@@ -155,13 +155,18 @@ def get_conversation_messages(conversation_id: str):
     ):
         raise HTTPException(status_code=404, detail="会话不存在")
     try:
-        messages = conversation_service.get_history(conversation_id)
+        messages = conversation_service.get_history_with_traces(conversation_id)
     except ConversationNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return {
         "conversation_id": conversation_id,
         "messages": [
-            {"role": item["role"], "content": item["content"]}
+            {
+                "role": item["role"],
+                "content": item["content"],
+                "created_at": item["created_at"],
+                "trace": item.get("trace"),
+            }
             for item in messages
         ],
     }

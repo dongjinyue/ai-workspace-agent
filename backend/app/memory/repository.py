@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -94,6 +95,70 @@ def save_message(conversation_id: str, role: str, content: str) -> int:
             (now, conversation_id),
         )
     return int(cursor.lastrowid)
+
+
+def save_assistant_message_with_trace(
+    conversation_id: str,
+    content: str,
+    trace: dict,
+) -> int:
+    """在同一事务中保存助手回答及其安全执行元数据。"""
+    now = _now()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO messages (conversation_id, role, content, created_at)
+            VALUES (?, 'assistant', ?, ?)
+            """,
+            (conversation_id, content, now),
+        )
+        message_id = int(cursor.lastrowid)
+        connection.execute(
+            """
+            INSERT INTO agent_runs (
+                assistant_message_id, conversation_id, trace_json, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                conversation_id,
+                json.dumps(trace, ensure_ascii=False),
+                now,
+            ),
+        )
+        connection.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (now, conversation_id),
+        )
+    return message_id
+
+
+def get_messages_with_traces(conversation_id: str) -> list[dict]:
+    """读取用户可见消息，并为助手回答附加可公开的执行轨迹。"""
+    init_database()
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT m.role, m.content, m.created_at, r.trace_json
+            FROM messages AS m
+            LEFT JOIN agent_runs AS r ON r.assistant_message_id = m.id
+            WHERE m.conversation_id = ?
+            ORDER BY m.id ASC
+            """,
+            (conversation_id,),
+        ).fetchall()
+
+    messages = []
+    for row in rows:
+        item = {
+            "role": row["role"],
+            "content": row["content"],
+            "created_at": row["created_at"],
+        }
+        if row["trace_json"]:
+            item["trace"] = json.loads(row["trace_json"])
+        messages.append(item)
+    return messages
 
 
 def get_messages(

@@ -37,6 +37,18 @@ def register_dynamic_tool(tool: ToolDefinition) -> None:
     TOOLS[tool.name] = tool
 
 
+def unregister_mcp_tools(server: str) -> None:
+    """移除指定 Server 的旧发现结果，避免故障后继续向模型暴露失效工具。"""
+    names = [
+        name
+        for name, tool in DYNAMIC_TOOLS.items()
+        if tool.source == "mcp" and tool.server == server
+    ]
+    for name in names:
+        DYNAMIC_TOOLS.pop(name, None)
+        TOOLS.pop(name, None)
+
+
 def get_tool_definitions() -> dict[str, ToolDefinition]:
     return TOOLS
 
@@ -57,6 +69,8 @@ def get_tool_handlers() -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def discover_mcp_tools() -> tuple[dict[str, Any], ...]:
     """通过真实 MCP list_tools 动态发现并注册允许的外部工具。"""
+    # 每次重新发现前清理旧快照；若 Server 已宕机，模型不会继续看到过期 Schema。
+    unregister_mcp_tools("workspace")
     schemas: list[dict[str, Any]] = []
     for item in MCPClient().list_tools_sync():
         name = item["name"]

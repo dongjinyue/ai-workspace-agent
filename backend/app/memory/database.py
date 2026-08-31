@@ -60,6 +60,20 @@ def init_database() -> None:
             ON messages (conversation_id, id)
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                assistant_message_id INTEGER PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                trace_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (assistant_message_id)
+                    REFERENCES messages(id) ON DELETE CASCADE,
+                FOREIGN KEY (conversation_id)
+                    REFERENCES conversations(id) ON DELETE CASCADE
+            )
+            """
+        )
         # 兼容旧数据库，在不丢失已有会话的前提下补充标题列。
         columns = {
             row["name"]
