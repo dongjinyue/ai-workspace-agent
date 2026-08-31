@@ -26,6 +26,22 @@ class ConversationTurnResult:
 
 
 class ConversationService:
+    def list_conversations(self) -> list[dict[str, str | int]]:
+        return repository.list_conversations()
+
+    def create_conversation(self, title: str = "新会话") -> dict[str, str]:
+        conversation_id = repository.create_conversation(title)
+        return {"id": conversation_id, "title": title}
+
+    def rename_conversation(self, conversation_id: str, title: str) -> dict[str, str]:
+        if not repository.rename_conversation(conversation_id, title):
+            raise ConversationNotFoundError("会话不存在")
+        return {"id": conversation_id, "title": title}
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        if not repository.delete_conversation(conversation_id):
+            raise ConversationNotFoundError("会话不存在")
+
     def resolve_conversation(self, conversation_id: str | None) -> str:
         if conversation_id is None:
             return repository.create_conversation()
@@ -50,6 +66,7 @@ class ConversationService:
 
             # 先保存，再读取。当前用户消息因此只会进入 Agent 上下文一次。
             repository.save_message(resolved_id, "user", message)
+            repository.use_first_message_as_title(resolved_id, message)
             history = repository.get_messages(resolved_id, limit=HISTORY_WINDOW)
             agent_result = run_agent(
                 message=message,

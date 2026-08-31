@@ -1,292 +1,149 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import "./App.css";
+import "./ModeSwitch.css";
 
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const API = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+async function request(path, options) {
+  const response = await fetch(`${API}${path}`, options);
+  if (response.status === 204) return null;
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "请求失败，请稍后重试");
+  return data;
+}
 
 function App() {
-  const [question, setQuestion] = useState("");
+  const [conversations, setConversations] = useState([]);
+  const [conversationId, setConversationId] = useState("");
   const [messages, setMessages] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [question, setQuestion] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [documentStatus, setDocumentStatus] = useState("尚未上传知识库文件");
-  const [matchedChunks, setMatchedChunks] = useState(0);
-  const [llmCalled, setLlmCalled] = useState(false);
-  const [agentInfo, setAgentInfo] = useState(null);
-  const [trace, setTrace] = useState(null);
-  const [knowledgeBaseId, setKnowledgeBaseId] = useState(
-    () => localStorage.getItem("knowledge_base_id") || "",
-  );
-  const [conversationId, setConversationId] = useState(
-    () => localStorage.getItem("conversation_id") || "",
-  );
+  const [agentMode, setAgentMode] = useState(true);
+  const [knowledgeBaseId, setKnowledgeBaseId] = useState(() => localStorage.getItem("knowledge_base_id") || "");
+  const bottomRef = useRef(null);
 
-  useEffect(() => {
-    // 页面刷新后只用随机会话 ID 拉取历史；Local Storage 不保存密钥。
-    const storedId = localStorage.getItem("conversation_id");
-    if (!storedId) return;
-
-    let cancelled = false;
-    async function restoreConversation() {
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/conversations/${storedId}/messages`,
-        );
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "读取会话历史失败");
-        if (!cancelled) setMessages(data.messages || []);
-      } catch (restoreError) {
-        if (!cancelled) {
-          localStorage.removeItem("conversation_id");
-          setConversationId("");
-          setError(restoreError.message);
-        }
-      }
-    }
-    restoreConversation();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  function newConversation() {
-    // 清空当前 ID 后，下一条消息会由后端创建一个完全隔离的新会话。
-    localStorage.removeItem("conversation_id");
-    setConversationId("");
-    setMessages([]);
-    setQuestion("");
-    setAgentInfo(null);
-    setTrace(null);
-    setError("");
+  async function refresh(preferredId) {
+    const data = await request("/api/conversations");
+    setConversations(data.conversations);
+    const saved = preferredId || localStorage.getItem("conversation_id");
+    return data.conversations.some((item) => item.id === saved) ? saved : data.conversations[0]?.id || "";
   }
 
-  function updateKnowledgeBaseId(value) {
-    const normalizedValue = value.trim();
-    setKnowledgeBaseId(normalizedValue);
+  async function select(id) {
+    setConversationId(id);
+    localStorage.setItem("conversation_id", id);
+    setSidebarOpen(false);
+    const data = await request(`/api/conversations/${id}/messages`);
+    setMessages(data.messages || []);
+  }
 
-    if (normalizedValue) {
-      localStorage.setItem("knowledge_base_id", normalizedValue);
-      setDocumentStatus("已连接到持久化知识库");
-    } else {
-      localStorage.removeItem("knowledge_base_id");
-      setDocumentStatus("尚未上传知识库文件");
+  useEffect(() => {
+    let active = true;
+    async function restore() {
+      try {
+        const id = await refresh();
+        if (active && id) await select(id);
+      } catch (loadError) { if (active) setError(loadError.message); }
     }
+    restore();
+    return () => { active = false; };
+  }, []);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
+
+  async function createConversation() {
+    try {
+      const item = await request("/api/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: "新会话" }) });
+      await refresh(item.id);
+      await select(item.id);
+      setQuestion("");
+    } catch (e) { setError(e.message); }
+  }
+
+  async function renameConversation(id) {
+    const title = editing?.title.trim();
+    if (!title) return setEditing(null);
+    try {
+      await request(`/api/conversations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }) });
+      setEditing(null);
+      await refresh(id);
+    } catch (e) { setError(e.message); }
+  }
+
+  async function deleteConversation(id) {
+    if (!window.confirm("确定删除这个会话及其全部消息吗？此操作无法撤销。")) return;
+    try {
+      await request(`/api/conversations/${id}`, { method: "DELETE" });
+      const nextId = await refresh();
+      if (nextId) await select(nextId);
+      else { setConversationId(""); setMessages([]); localStorage.removeItem("conversation_id"); }
+    } catch (e) { setError(e.message); }
+  }
+
+  async function sendMessage() {
+    const content = question.trim();
+    if (!content || loading) return;
+    setQuestion(""); setError(""); setLoading(true);
+    setMessages((items) => [...items, { role: "user", content }]);
+    try {
+      const endpoint = agentMode ? "/api/agent/chat" : "/api/chat";
+      const data = await request(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, conversation_id: conversationId || null, knowledge_base_id: knowledgeBaseId || null }) });
+      setConversationId(data.conversation_id);
+      localStorage.setItem("conversation_id", data.conversation_id);
+      setMessages((items) => [...items, { role: "assistant", content: data.answer }]);
+      await refresh(data.conversation_id);
+    } catch (e) {
+      setMessages((items) => items.slice(0, -1)); setQuestion(content); setError(e.message);
+    } finally { setLoading(false); }
   }
 
   async function uploadDocument(event) {
     const file = event.target.files?.[0];
     if (!file) return;
-
-    if (file.size > 1024 * 1024) {
-      setError("TXT 文件不能超过 1 MB");
-      event.target.value = "";
-      return;
-    }
-
-    setUploading(true);
-    setError("");
-
+    setUploading(true); setError("");
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(`${API_BASE_URL}/api/documents/upload`, {
-        method: "POST",
-        body: formData,
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "文档上传失败");
-      }
-
-      updateKnowledgeBaseId(data.knowledge_base_id);
-      setDocumentStatus(`已加载 ${data.filename}，共 ${data.chunks} 个文本块`);
-    } catch (uploadError) {
-      setDocumentStatus("知识库文件上传失败");
-      setError(uploadError.message);
-    } finally {
-      setUploading(false);
-      event.target.value = "";
-    }
+      const form = new FormData(); form.append("file", file);
+      const data = await request("/api/documents/upload", { method: "POST", body: form });
+      setKnowledgeBaseId(data.knowledge_base_id);
+      localStorage.setItem("knowledge_base_id", data.knowledge_base_id);
+    } catch (e) { setError(e.message); }
+    finally { setUploading(false); event.target.value = ""; }
   }
 
-  async function sendMessage() {
-    if (!question.trim()) {
-      setError("请输入问题");
-      return;
-    }
-
-    setLoading(true);
-    setMatchedChunks(0);
-    setLlmCalled(false);
-    setAgentInfo(null);
-    setTrace(null);
-    setError("");
-
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/chat`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            message: question,
-            knowledge_base_id: knowledgeBaseId || null,
-            conversation_id: conversationId || null,
-          }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "请求失败");
-      }
-
-      // 首次响应返回后端生成的 ID，后续请求继续携带它以恢复上下文。
-      if (data.conversation_id !== conversationId) {
-        setConversationId(data.conversation_id);
-        localStorage.setItem("conversation_id", data.conversation_id);
-      }
-      setMessages((current) => [
-        ...current,
-        { role: "user", content: question.trim() },
-        { role: "assistant", content: data.answer },
-      ]);
-      setQuestion("");
-      setMatchedChunks(data.matched_chunks || 0);
-      setLlmCalled(Boolean(data.llm_called));
-      setAgentInfo(data.agent || null);
-      setTrace(data.trace || null);
-    } catch (requestError) {
-      setError(requestError.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <main>
-      <h1>AI Workspace Agent</h1>
-
-      <section>
-        <h2>Conversation（会话）</h2>
-        <p>Conversation ID：{conversationId || "将在首次发送消息时创建"}</p>
-        <button type="button" onClick={newConversation} disabled={loading}>
-          新建会话
-        </button>
-      </section>
-
-      <section>
-        <h2>企业知识库</h2>
-        <input
-          type="file"
-          accept=".txt,text/plain"
-          onChange={uploadDocument}
-          disabled={uploading}
-        />
-        <p>{uploading ? "正在上传并处理……" : documentStatus}</p>
-        <label>
-          知识库 ID
-          <input
-            type="text"
-            value={knowledgeBaseId}
-            onChange={(event) => updateKnowledgeBaseId(event.target.value)}
-            placeholder="上传后自动生成，也可以粘贴已有 ID"
-            maxLength={64}
-          />
-        </label>
-      </section>
-
-      <textarea
-        value={question}
-        onChange={(event) => setQuestion(event.target.value)}
-        placeholder="请输入你的问题"
-        rows="5"
-        maxLength={4000}
-      />
-
-      <div>
-        <button
-          onClick={sendMessage}
-          disabled={loading}
-        >
-          {loading ? "正在思考……" : "发送"}
-        </button>
+  const activeConversation = conversations.find((item) => item.id === conversationId);
+  return <main className="app-shell">
+    <button className="mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="打开会话列表">☰</button>
+    {sidebarOpen && <button className="sidebar-mask" onClick={() => setSidebarOpen(false)} aria-label="关闭会话列表" />}
+    <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
+      <div className="brand"><span>AI</span><div><strong>Workspace</strong><small>智能工作台</small></div></div>
+      <button className="new-chat" onClick={createConversation}>＋ 新建会话</button>
+      <p className="section-label">最近会话</p>
+      <div className="conversation-list">
+        {conversations.map((item) => <div className={`conversation-item ${item.id === conversationId ? "active" : ""}`} key={item.id}>
+          {editing?.id === item.id ? <input autoFocus value={editing.title} onChange={(e) => setEditing({ id: item.id, title: e.target.value })} onBlur={() => renameConversation(item.id)} onKeyDown={(e) => { if (e.key === "Enter") renameConversation(item.id); if (e.key === "Escape") setEditing(null); }} /> :
+            <button className="conversation-main" onClick={() => select(item.id)}><b>◇</b><span><strong>{item.title}</strong><small>{item.message_count} 条消息</small></span></button>}
+          <div className="actions"><button title="重命名" onClick={() => setEditing({ id: item.id, title: item.title })}>✎</button><button title="删除" onClick={() => deleteConversation(item.id)}>×</button></div>
+        </div>)}
+        {!conversations.length && <p className="empty">还没有会话，点击上方按钮开始吧</p>}
       </div>
-
-      {error && (
-        <p style={{ color: "red" }}>
-          {error}
-        </p>
-      )}
-
-      {messages.length > 0 && (
-        <section>
-          <h2>聊天记录</h2>
-          {messages.map((message, index) => (
-            <article key={`${message.role}-${index}`}>
-              <strong>{message.role === "user" ? "你" : "助手"}</strong>
-              <p style={{ whiteSpace: "pre-wrap" }}>{message.content}</p>
-            </article>
-          ))}
-        </section>
-      )}
-
-      {agentInfo && (
-        <section>
-          <h2>最近一次执行</h2>
-          <small>本次回答匹配到 {matchedChunks} 个知识片段</small>
-          <small> · {llmCalled ? "已调用 LLM" : "未调用 LLM"}</small>
-          <p>Skill：{agentInfo.active_skill || "无"}</p>
-          <p>
-            Tools：
-            {agentInfo.tools_used?.length
-              ? agentInfo.tools_used.join(", ")
-              : "无"}
-          </p>
-          <p>Tool Source：{agentInfo.tool_source || "无"}</p>
-          <p>MCP Server：{agentInfo.mcp_server || "无"}</p>
-          <p>执行步骤：{agentInfo.steps}</p>
-        </section>
-      )}
-
-      {trace && (
-        <details>
-          {/* 调试轨迹默认折叠，只展示执行元数据，不展示模型思维过程。 */}
-          <summary>Agent Trace（智能代理执行轨迹）</summary>
-          <p>Request ID：{trace.request_id}</p>
-          <p>开始时间：{trace.started_at}</p>
-          <p>总耗时：{trace.duration_ms} ms</p>
-          <p>步骤：{trace.steps}</p>
-          <p>Skill：{trace.skill || "无"}</p>
-          <p>
-            RAG：{trace.rag?.hit ? "命中" : "未命中"}（
-            {trace.rag?.results || 0} 条）
-          </p>
-          <p>
-            LLM Calls：{trace.llm_calls}，耗时 {trace.llm_duration_ms} ms
-          </p>
-          <h3>Tools（工具）</h3>
-          {trace.tools?.length ? (
-            <ul>
-              {trace.tools.map((tool, index) => (
-                <li key={`${tool.name}-${index}`}>
-                  {tool.name} — {tool.source} — {tool.duration_ms} ms
-                  {tool.server ? ` — ${tool.server}` : ""}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>无</p>
-          )}
-        </details>
-      )}
-    </main>
-  );
+      <label className="knowledge"><span>企业知识库 <i>{knowledgeBaseId ? "已连接" : "未连接"}</i></span><small>{uploading ? "正在上传…" : knowledgeBaseId ? `ID · ${knowledgeBaseId.slice(0, 8)}…` : "点击上传 TXT 文档"}</small><input type="file" accept=".txt,text/plain" onChange={uploadDocument} disabled={uploading} /></label>
+    </aside>
+    <section className="chat-panel">
+      <header><div><h1>{activeConversation?.title || "AI Workspace Agent"}</h1><p>{conversationId ? "会话已持久保存" : "创建会话，开始探索"}</p></div><div className="header-actions"><label className="mode-switch"><span>{agentMode ? "Agent 模式" : "普通模式"}</span><input type="checkbox" checked={agentMode} onChange={(e) => setAgentMode(e.target.checked)} /><i /></label><span className="online">● 在线</span></div></header>
+      <div className="messages">
+        {!messages.length && <div className="welcome"><span>✦</span><h2>有什么可以帮你？</h2><p>你可以询问工作问题，也可以上传企业文档，让我结合知识库回答。</p></div>}
+        {messages.map((message, index) => <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
+          {message.role === "assistant" && <div className="avatar ai">AI</div>}
+          <div className="message-content"><small>{message.role === "assistant" ? "AI 助手" : "你"}</small><div className="bubble">{message.content}</div></div>
+          {message.role === "user" && <div className="avatar user">你</div>}
+        </article>)}
+        {loading && <article className="message assistant"><div className="avatar ai">AI</div><div className="typing"><i /><i /><i /></div></article>}
+        <div ref={bottomRef} />
+      </div>
+      <footer>{error && <div className="error">{error}</div>}<div className="composer"><textarea rows="1" maxLength="4000" value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }} placeholder="输入你的问题…" /><button onClick={sendMessage} disabled={!question.trim() || loading}>↑</button></div><small>Enter 发送 · Shift + Enter 换行 · 对话会自动保存</small></footer>
+    </section>
+  </main>;
 }
-
 export default App;

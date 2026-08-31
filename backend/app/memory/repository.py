@@ -8,19 +8,63 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_conversation() -> str:
+def create_conversation(title: str = "新会话") -> str:
     init_database()
     conversation_id = uuid4().hex
     now = _now()
     with get_connection() as connection:
         connection.execute(
             """
-            INSERT INTO conversations (id, created_at, updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO conversations (id, title, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (conversation_id, now, now),
+            (conversation_id, title, now, now),
         )
     return conversation_id
+
+
+def list_conversations() -> list[dict[str, str | int]]:
+    """返回会话摘要，最近使用的会话排在最前面。"""
+    init_database()
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT c.id, c.title, c.created_at, c.updated_at,
+                   COUNT(m.id) AS message_count
+            FROM conversations AS c
+            LEFT JOIN messages AS m ON m.conversation_id = c.id
+            GROUP BY c.id
+            ORDER BY c.updated_at DESC
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def rename_conversation(conversation_id: str, title: str) -> bool:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+            (title, _now(), conversation_id),
+        )
+    return cursor.rowcount > 0
+
+
+def delete_conversation(conversation_id: str) -> bool:
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+        )
+    return cursor.rowcount > 0
+
+
+def use_first_message_as_title(conversation_id: str, message: str) -> None:
+    """仅替换默认标题，保留用户主动修改过的标题。"""
+    title = message.strip().replace("\n", " ")[:28] or "新会话"
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE conversations SET title = ? WHERE id = ? AND title = '新会话'",
+            (title, conversation_id),
+        )
 
 
 def conversation_exists(conversation_id: str) -> bool:

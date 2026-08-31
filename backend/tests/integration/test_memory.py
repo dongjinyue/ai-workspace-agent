@@ -153,3 +153,59 @@ def test_chat_api_reuses_conversation_and_history_api_restores_messages():
         "user",
         "assistant",
     ]
+
+
+def test_conversation_crud_api_persists_title_and_deletes_messages():
+    """会话列表、重命名和级联删除都应由 SQLite 持久保存。"""
+    client = TestClient(app)
+    created = client.post("/api/conversations", json={"title": "项目讨论"})
+    assert created.status_code == 201
+    conversation_id = created.json()["id"]
+    repository.save_message(conversation_id, "user", "测试消息")
+
+    listed = client.get("/api/conversations")
+    assert listed.status_code == 200
+    assert listed.json()["conversations"][0]["title"] == "项目讨论"
+    assert listed.json()["conversations"][0]["message_count"] == 1
+
+    renamed = client.patch(
+        f"/api/conversations/{conversation_id}", json={"title": "新的标题"}
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "新的标题"
+
+    deleted = client.delete(f"/api/conversations/{conversation_id}")
+    assert deleted.status_code == 204
+    assert not repository.conversation_exists(conversation_id)
+
+
+def test_cors_allows_vite_fallback_development_port():
+    """Vite 自动切换到 5174 等端口后，浏览器预检请求仍应成功。"""
+    response = TestClient(app).options(
+        "/api/chat",
+        headers={
+            "Origin": "http://localhost:5174",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == (
+        "http://localhost:5174"
+    )
+
+
+def test_agent_chat_endpoint_keeps_conversation_memory():
+    """独立 Agent 接口应复用原有持久化链路，而不是产生临时回答。"""
+    with patch("app.memory.service.run_agent", return_value=_agent_result("完成")):
+        response = TestClient(app).post(
+            "/api/agent/chat", json={"message": "现在几点？"}
+        )
+
+    assert response.status_code == 200
+    conversation_id = response.json()["conversation_id"]
+    assert [item["role"] for item in repository.get_messages(conversation_id)] == [
+        "user",
+        "assistant",
+    ]

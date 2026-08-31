@@ -25,10 +25,9 @@ conversation_service = ConversationService()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    # Vite（前端开发服务器）在默认端口被占用时会自动改用 5174、5175 等端口。
+    # 仅允许本机 HTTP 地址，避免为了开发便利而开放任意网站跨域访问接口。
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d{1,5}$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,6 +56,14 @@ class SearchRequest(BaseModel):
         max_length=64,
         pattern=r"^[A-Za-z0-9_-]+$",
     )
+
+
+class ConversationCreateRequest(BaseModel):
+    title: str = Field(default="新会话", min_length=1, max_length=60)
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
 
 
 MAX_FILE_SIZE = 1024 * 1024
@@ -135,6 +142,12 @@ def chat(request: ChatRequest):
         ) from error
 
 
+@app.post("/api/agent/chat")
+def agent_chat(request: ChatRequest):
+    """提供独立 Agent 入口，同时复用已有的记忆与安全执行链路。"""
+    return chat(request)
+
+
 @app.get("/api/conversations/{conversation_id}/messages")
 def get_conversation_messages(conversation_id: str):
     if len(conversation_id) != 32 or any(
@@ -152,6 +165,34 @@ def get_conversation_messages(conversation_id: str):
             for item in messages
         ],
     }
+
+
+@app.get("/api/conversations")
+def list_conversations():
+    return {"conversations": conversation_service.list_conversations()}
+
+
+@app.post("/api/conversations", status_code=201)
+def create_conversation(request: ConversationCreateRequest):
+    return conversation_service.create_conversation(request.title.strip())
+
+
+@app.patch("/api/conversations/{conversation_id}")
+def rename_conversation(conversation_id: str, request: ConversationUpdateRequest):
+    try:
+        return conversation_service.rename_conversation(
+            conversation_id, request.title.strip()
+        )
+    except ConversationNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.delete("/api/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: str):
+    try:
+        conversation_service.delete_conversation(conversation_id)
+    except ConversationNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.post("/api/documents/upload")

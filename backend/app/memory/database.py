@@ -60,3 +60,12 @@ def init_database() -> None:
             ON messages (conversation_id, id)
             """
         )
+        # 兼容旧数据库，在不丢失已有会话的前提下补充标题列。
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(conversations)").fetchall()
+        }
+        if "title" not in columns:
+            connection.execute(
+                "ALTER TABLE conversations ADD COLUMN title TEXT NOT NULL DEFAULT '新会话'"
+            )
