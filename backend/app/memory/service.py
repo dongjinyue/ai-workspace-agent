@@ -1,4 +1,6 @@
 import logging
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
@@ -26,8 +28,24 @@ class ConversationTurnResult:
 
 
 class ConversationService:
-    def list_conversations(self) -> list[dict[str, str | int]]:
-        return repository.list_conversations()
+    def __init__(self) -> None:
+        # 同一进程内按会话串行执行，避免问题和回答交叉写入。
+        self._locks_guard = threading.Lock()
+        self._conversation_locks: dict[str, threading.Lock] = {}
+
+    @contextmanager
+    def _conversation_lock(self, conversation_id: str):
+        with self._locks_guard:
+            lock = self._conversation_locks.setdefault(
+                conversation_id, threading.Lock()
+            )
+        with lock:
+            yield
+
+    def list_conversations(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, str | int]]:
+        return repository.list_conversations(limit=limit, offset=offset)
 
     def create_conversation(self, title: str = "新会话") -> dict[str, str]:
         conversation_id = repository.create_conversation(title)
@@ -61,73 +79,88 @@ class ConversationService:
         started_at = datetime.now(timezone.utc).isoformat()
         request_started = perf_counter()
         resolved_id: str | None = None
-        try:
-            resolved_id = self.resolve_conversation(conversation_id)
-
-            # 先保存，再读取。当前用户消息因此只会进入 Agent 上下文一次。
-            repository.save_message(resolved_id, "user", message)
-            repository.use_first_message_as_title(resolved_id, message)
-            history = repository.get_messages(resolved_id, limit=HISTORY_WINDOW)
-            agent_result = run_agent(
-                message=message,
-                knowledge_base_id=knowledge_base_id,
-                conversation_id=resolved_id,
-                history_messages=[
+        resolved_id = self.resolve_conversation(conversation_id)
+        with self._conversation_lock(resolved_id):
+            user_message_id: int | None = None
+            try:
+                # 先保存，再读取。当前用户消息因此只进入模型上下文一次。
+                user_message_id = repository.save_message(resolved_id, "user", message)
+                repository.use_first_message_as_title(resolved_id, message)
+                history = repository.get_messages(resolved_id, limit=HISTORY_WINDOW)
+                public_history = [
                     {"role": item["role"], "content": item["content"]}
                     for item in history
-                ],
+                ]
+                # 所有会话统一进入 Agent Loop，由模型按需决定是否调用工具。
+                agent_result = run_agent(
+                    message=message,
+                    knowledge_base_id=knowledge_base_id,
+                    conversation_id=resolved_id,
+                    history_messages=public_history,
+                )
+            except Exception as error:
+                # 未完成轮次不应污染后续上下文；只回滚本次用户消息。
+                if user_message_id is not None:
+                    repository.delete_message(user_message_id)
+                logger.error(
+                    "Chat request failed request_id=%s conversation_id=%s error_type=%s",
+                    request_id,
+                    resolved_id,
+                    type(error).__name__,
+                )
+                raise
+
+            duration_ms = round((perf_counter() - request_started) * 1000, 3)
+            # 只组装可安全公开的执行元数据，不包含模型内部思维过程。
+            trace = RequestTrace(
+                request_id=request_id,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=duration_ms,
+                steps=agent_result.steps,
+                skill=agent_result.active_skill,
+                tools=agent_result.tool_traces or [],
+                rag={
+                    "hit": agent_result.matched_chunks > 0,
+                    "results": agent_result.matched_chunks,
+                },
+                llm_calls=agent_result.llm_calls,
+                llm_duration_ms=agent_result.llm_duration_ms,
             )
-        except Exception as error:
-            # 日志只记录不可逆推出正文的标识和错误类型，不记录用户消息或密钥。
-            logger.error(
-                "Agent request failed request_id=%s conversation_id=%s error_type=%s",
+            repository.save_assistant_message_with_trace(
+                resolved_id,
+                agent_result.answer,
+                trace.to_dict(),
+            )
+            logger.info(
+                "Chat request completed request_id=%s conversation_id=%s duration_ms=%.3f",
                 request_id,
                 resolved_id,
-                type(error).__name__,
+                duration_ms,
             )
-            raise
-
-        duration_ms = round((perf_counter() - request_started) * 1000, 3)
-        # 只组装可安全公开的执行元数据，不包含提示词和模型内部思维过程。
-        trace = RequestTrace(
-            request_id=request_id,
-            started_at=started_at,
-            completed_at=datetime.now(timezone.utc).isoformat(),
-            duration_ms=duration_ms,
-            steps=agent_result.steps,
-            skill=agent_result.active_skill,
-            tools=agent_result.tool_traces or [],
-            rag={
-                "hit": agent_result.matched_chunks > 0,
-                "results": agent_result.matched_chunks,
-            },
-            llm_calls=agent_result.llm_calls,
-            llm_duration_ms=agent_result.llm_duration_ms,
-        )
-        repository.save_assistant_message_with_trace(
-            resolved_id,
-            agent_result.answer,
-            trace.to_dict(),
-        )
-        logger.info(
-            "Agent request completed request_id=%s conversation_id=%s duration_ms=%.3f",
-            request_id,
-            resolved_id,
-            duration_ms,
-        )
-        return ConversationTurnResult(
-            conversation_id=resolved_id,
-            history_messages=len(history),
-            agent=agent_result,
-            trace=trace,
-        )
+            return ConversationTurnResult(
+                conversation_id=resolved_id,
+                history_messages=len(history),
+                agent=agent_result,
+                trace=trace,
+            )
 
     def get_history(self, conversation_id: str) -> list[dict[str, str]]:
         if not repository.conversation_exists(conversation_id):
             raise ConversationNotFoundError("会话不存在")
         return repository.get_messages(conversation_id)
 
-    def get_history_with_traces(self, conversation_id: str) -> list[dict]:
+    def get_history_with_traces(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
         if not repository.conversation_exists(conversation_id):
             raise ConversationNotFoundError("会话不存在")
-        return repository.get_messages_with_traces(conversation_id)
+        return repository.get_messages_with_traces(
+            conversation_id,
+            limit=limit,
+            offset=offset,
+        )

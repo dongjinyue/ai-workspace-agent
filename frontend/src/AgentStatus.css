@@ -1,0 +1,15 @@
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.agent-status {
+  padding: 5px 10px;
+  border: 1px solid #deddfb;
+  border-radius: 999px;
+  color: #5555c7;
+  background: #f3f2ff;
+  font-size: 12px;
+  font-weight: 600;
+}

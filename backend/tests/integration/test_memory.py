@@ -122,12 +122,12 @@ def test_chat_api_reuses_conversation_and_history_api_restores_messages():
         return _agent_result(f"回答-{len(captured_histories)}")
 
     with patch("app.memory.service.run_agent", side_effect=fake_run_agent):
-        first = client.post("/api/chat", json={"message": "我叫小明"})
+        first = client.post("/api/agent/chat", json={"message": "我叫小明"})
         assert first.status_code == 200
         conversation_id = first.json()["conversation_id"]
 
         second = client.post(
-            "/api/chat",
+            "/api/agent/chat",
             json={
                 "message": "我叫什么？",
                 "conversation_id": conversation_id,
@@ -209,3 +209,29 @@ def test_agent_chat_endpoint_keeps_conversation_memory():
         "user",
         "assistant",
     ]
+
+
+def test_legacy_chat_endpoint_also_uses_agent_tools():
+    """旧接口保留兼容性，但同样进入可自主选择工具的 Agent Loop。"""
+    agent_result = _agent_result("Agent 回答")
+    with patch("app.memory.service.run_agent", return_value=agent_result) as agent:
+        response = TestClient(app).post("/api/chat", json={"message": "你好"})
+
+    assert response.status_code == 200
+    assert response.json()["answer"] == "Agent 回答"
+    agent.assert_called_once()
+
+
+def test_failed_agent_turn_rolls_back_user_message():
+    conversation_id = repository.create_conversation()
+    with patch(
+        "app.memory.service.run_agent",
+        side_effect=RuntimeError("provider unavailable"),
+    ):
+        response = TestClient(app).post(
+            "/api/agent/chat",
+            json={"message": "不会残留", "conversation_id": conversation_id},
+        )
+
+    assert response.status_code == 502
+    assert repository.get_messages(conversation_id) == []

@@ -24,7 +24,7 @@ def create_conversation(title: str = "新会话") -> str:
     return conversation_id
 
 
-def list_conversations() -> list[dict[str, str | int]]:
+def list_conversations(*, limit: int = 50, offset: int = 0) -> list[dict[str, str | int]]:
     """返回会话摘要，最近使用的会话排在最前面。"""
     init_database()
     with get_connection() as connection:
@@ -36,7 +36,9 @@ def list_conversations() -> list[dict[str, str | int]]:
             LEFT JOIN messages AS m ON m.conversation_id = c.id
             GROUP BY c.id
             ORDER BY c.updated_at DESC
-            """
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -97,6 +99,12 @@ def save_message(conversation_id: str, role: str, content: str) -> int:
     return int(cursor.lastrowid)
 
 
+def delete_message(message_id: int) -> None:
+    """删除指定消息，用于 Agent 失败时回滚尚未完成的用户轮次。"""
+    with get_connection() as connection:
+        connection.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+
+
 def save_assistant_message_with_trace(
     conversation_id: str,
     content: str,
@@ -133,19 +141,29 @@ def save_assistant_message_with_trace(
     return message_id
 
 
-def get_messages_with_traces(conversation_id: str) -> list[dict]:
+def get_messages_with_traces(
+    conversation_id: str,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict]:
     """读取用户可见消息，并为助手回答附加可公开的执行轨迹。"""
     init_database()
     with get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT m.role, m.content, m.created_at, r.trace_json
-            FROM messages AS m
-            LEFT JOIN agent_runs AS r ON r.assistant_message_id = m.id
-            WHERE m.conversation_id = ?
-            ORDER BY m.id ASC
+            SELECT page.role, page.content, page.created_at, page.trace_json
+            FROM (
+                SELECT m.id, m.role, m.content, m.created_at, r.trace_json
+                FROM messages AS m
+                LEFT JOIN agent_runs AS r ON r.assistant_message_id = m.id
+                WHERE m.conversation_id = ?
+                ORDER BY m.id DESC
+                LIMIT ? OFFSET ?
+            ) AS page
+            ORDER BY page.id ASC
             """,
-            (conversation_id,),
+            (conversation_id, limit, offset),
         ).fetchall()
 
     messages = []

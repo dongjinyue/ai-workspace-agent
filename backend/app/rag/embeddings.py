@@ -9,6 +9,7 @@ from dashscope import TextEmbedding
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v4")
 EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
 EMBEDDING_BATCH_SIZE = 10
+MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "45"))
 
 
 def embed_texts(
@@ -39,6 +40,7 @@ def embed_texts(
             text_type=text_type,
             dimension=EMBEDDING_DIMENSION,
             output_type="dense",
+            timeout=MODEL_TIMEOUT_SECONDS,
         )
 
         if response.status_code != HTTPStatus.OK:

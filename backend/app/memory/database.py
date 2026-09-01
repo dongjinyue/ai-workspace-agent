@@ -74,6 +74,16 @@ def init_database() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_bases (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         # 兼容旧数据库，在不丢失已有会话的前提下补充标题列。
         columns = {
             row["name"]

@@ -54,6 +54,12 @@ def find_collection(knowledge_base_id: str) -> Collection | None:
         raise
 
 
+def delete_collection(knowledge_base_id: str) -> None:
+    """删除指定知识库的全部向量；不存在时保持幂等。"""
+    if find_collection(knowledge_base_id) is not None:
+        client.delete_collection(name=_collection_name(knowledge_base_id))
+
+
 def add_chunks(
     knowledge_base_id: str,
     chunks: list[str],

@@ -28,7 +28,7 @@ def test_chat_returns_safe_structured_trace():
     )
     with patch("app.memory.service.run_agent", return_value=result):
         response = TestClient(app).post(
-            "/api/chat", json={"message": "137 乘 29 是多少？"}
+            "/api/agent/chat", json={"message": "137 乘 29 是多少？"}
         )
 
     assert response.status_code == 200

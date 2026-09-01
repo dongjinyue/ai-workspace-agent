@@ -1,11 +1,9 @@
 import json
 import logging
-import os
 from time import perf_counter
 from typing import Any
 
-from openai import OpenAI
-
+from app.agent.llm import create_llm_client, model_name
 from app.agent.state import AgentState
 from app.agent.service import get_agent_tool_schemas
 from app.skills.registry import get_skill
@@ -39,17 +37,9 @@ TOOL_RESULT_PROMPT = (
 )
 
 
-def _client() -> OpenAI:
-    api_key = os.getenv("DASHSCOPE_API_KEY")
-    if not api_key:
-        raise RuntimeError("服务器没有配置 DASHSCOPE_API_KEY")
-    return OpenAI(
-        api_key=api_key,
-        base_url=os.getenv(
-            "QWEN_BASE_URL",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        ),
-    )
+def _client():
+    """保留可测试的客户端工厂边界。"""
+    return create_llm_client()
 
 
 def agent_node(state: AgentState) -> dict[str, Any]:
@@ -78,7 +68,7 @@ def agent_node(state: AgentState) -> dict[str, Any]:
     llm_started = perf_counter()
     try:
         response = _client().chat.completions.create(
-            model=os.getenv("QWEN_MODEL", "qwen-max"),
+            model=model_name(),
             messages=[
                 {"role": "system", "content": system_prompt},
                 *state["messages"],

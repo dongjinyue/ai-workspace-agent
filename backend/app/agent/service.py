@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any
 
 from jsonschema import ValidationError, validate
@@ -11,6 +12,7 @@ from app.agent.registry import (
 )
 from app.mcp.client import MCPClient, MCPClientError
 from app.security import PROMPT_INJECTION_MARKERS
+from app.agent.llm import create_llm_client, model_name
 
 
 @dataclass(frozen=True)
