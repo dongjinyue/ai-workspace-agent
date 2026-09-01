@@ -26,3 +26,61 @@
   border-color: #6366f1;
   color: #fff;
 }
+
+.knowledge-documents {
+  max-height: 94px;
+  margin: 7px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.knowledge-documents li {
+  position: relative;
+  padding: 3px 0 3px 13px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #aeb9ca;
+  font-size: 10px;
+}
+
+.knowledge-documents li span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-documents li button {
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0;
+  flex: 0 0 18px;
+  border: 0;
+  border-radius: 5px;
+  color: #8390a5;
+  background: transparent;
+  cursor: pointer;
+}
+
+.knowledge-documents li button:hover {
+  color: #ff9b9b;
+  background: #ffffff0d;
+}
+
+.knowledge-documents li::before {
+  position: absolute;
+  left: 1px;
+  color: #7774ef;
+  content: "◆";
+  font-size: 6px;
+}
+
+.knowledge .knowledge-hint {
+  display: block;
+  margin-top: 7px;
+  color: #65738b;
+  font-size: 9px;
+}

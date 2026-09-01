@@ -3,9 +3,10 @@ from unittest.mock import patch
 
 import pytest
 
-from app.agent.nodes import SYSTEM_PROMPT, agent_node
+from app.agent.nodes import SYSTEM_PROMPT, agent_node, select_required_tool
 from app.agent.service import _ground_policy_summary, execute_tool
 from app.rag.service import index_document
+from app.agent.skills.knowledge_skill import get_knowledge_base_info
 from app.security import PromptInjectionError
 from app.skills.registry import get_skill, select_skill
 
@@ -64,6 +65,33 @@ def test_normal_chat_does_not_load_skill_prompt_and_keeps_calculator():
     assert "calculator" in tool_names
 
 
+def test_explicit_knowledge_question_forces_search_tool():
+    state = _state(None)
+    state["messages"] = [{"role": "user", "content": "审核流程配置是什么"}]
+    schemas = [
+        {"type": "function", "function": {"name": "search_knowledge_base"}},
+        {"type": "function", "function": {"name": "calculator"}},
+    ]
+    assert select_required_tool(state, schemas) == "search_knowledge_base"
+
+
+def test_document_count_question_forces_info_tool():
+    state = _state(None)
+    state["messages"] = [{"role": "user", "content": "知识库有多少文档"}]
+    schemas = [
+        {"type": "function", "function": {"name": "search_knowledge_base"}},
+        {"type": "function", "function": {"name": "get_knowledge_base_info"}},
+    ]
+    assert select_required_tool(state, schemas) == "get_knowledge_base_info"
+
+
+def test_general_greeting_keeps_model_auto_routing():
+    state = _state(None)
+    state["messages"] = [{"role": "user", "content": "你好"}]
+    schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
+    assert select_required_tool(state, schemas) is None
+
+
 def test_skill_execution_rejects_disallowed_tool():
     with pytest.raises(ValueError, match="当前技能不允许调用工具"):
         execute_tool(
@@ -81,6 +109,22 @@ def test_calculator_is_unaffected():
         None,
     )
     assert result["result"] == 391
+
+
+def test_knowledge_base_info_returns_document_count_and_names():
+    knowledge_base = {
+        "documents": [
+            {"filename": "制度.pdf"},
+            {"filename": "操作手册.docx"},
+        ]
+    }
+    with patch("app.rag.catalog.get_knowledge_base", return_value=knowledge_base):
+        result = get_knowledge_base_info("trusted-kb")
+
+    assert result == {
+        "document_count": 2,
+        "documents": ["制度.pdf", "操作手册.docx"],
+    }
 
 
 def test_split_line_prompt_injection_payload_is_not_grounded():

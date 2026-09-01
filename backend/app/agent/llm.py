@@ -1,6 +1,34 @@
 import os
 
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    OpenAI,
+    PermissionDeniedError,
+    RateLimitError,
+)
+
+
+class ModelServiceUnavailableError(RuntimeError):
+    """模型供应商不可用；对外只暴露安全、可操作的错误提示。"""
+
+
+def translate_model_error(error: Exception) -> None:
+    """把供应商异常转换为稳定的应用异常，避免泄漏原始响应。"""
+    if isinstance(
+        error,
+        (
+            AuthenticationError,
+            PermissionDeniedError,
+            RateLimitError,
+            APITimeoutError,
+            APIConnectionError,
+        ),
+    ):
+        raise ModelServiceUnavailableError(
+            "模型服务暂时不可用，请检查 API Key、模型额度或稍后重试"
+        ) from error
 
 
 def create_llm_client() -> OpenAI:

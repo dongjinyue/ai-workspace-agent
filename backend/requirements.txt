@@ -83,6 +83,10 @@ pyproject_hooks==1.2.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.3
 python-multipart==0.0.32
+python-docx==1.2.0
+pypdf==6.16.2
+pypdfium2==5.13.0
+rapidocr==3.9.2
 PyYAML==6.0.3
 referencing==0.37.0
 requests==2.34.2

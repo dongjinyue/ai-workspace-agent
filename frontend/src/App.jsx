@@ -66,6 +66,7 @@ function App() {
   const [tokenInput, setTokenInput] = useState("");
   const [backendOnline, setBackendOnline] = useState(false);
   const [knowledgeBaseId, setKnowledgeBaseId] = useState(() => localStorage.getItem("knowledge_base_id") || "");
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState([]);
   const bottomRef = useRef(null);
 
   async function refresh(preferredId) {
@@ -76,12 +77,17 @@ function App() {
   }
 
   async function restoreKnowledgeBase() {
-    if (localStorage.getItem("knowledge_base_id")) return;
-    const data = await request("/api/knowledge-bases?limit=1");
-    const latest = data.knowledge_bases?.[0];
-    if (latest) {
-      setKnowledgeBaseId(latest.id);
-      localStorage.setItem("knowledge_base_id", latest.id);
+    const data = await request("/api/knowledge-bases?limit=100");
+    const savedId = localStorage.getItem("knowledge_base_id");
+    const selected = data.knowledge_bases?.find((item) => item.id === savedId) || data.knowledge_bases?.[0];
+    if (selected) {
+      setKnowledgeBaseId(selected.id);
+      setKnowledgeDocuments(selected.documents || []);
+      localStorage.setItem("knowledge_base_id", selected.id);
+    } else {
+      setKnowledgeBaseId("");
+      setKnowledgeDocuments([]);
+      localStorage.removeItem("knowledge_base_id");
     }
   }
 
@@ -175,13 +181,17 @@ function App() {
   }
 
   async function uploadDocument(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+    const selectedFiles = Array.from(event.target.files || []);
+    if (!selectedFiles.length) return;
     setUploading(true); setError("");
     try {
-      const form = new FormData(); form.append("file", file);
+      const form = new FormData();
+      selectedFiles.forEach((selectedFile) => form.append("files", selectedFile));
+      // 已有知识库时追加文档；首次上传才让后端创建新知识库。
+      if (knowledgeBaseId) form.append("knowledge_base_id", knowledgeBaseId);
       const data = await request("/api/documents/upload", { method: "POST", body: form });
       setKnowledgeBaseId(data.knowledge_base_id);
+      setKnowledgeDocuments(data.documents || []);
       localStorage.setItem("knowledge_base_id", data.knowledge_base_id);
     } catch (e) { setError(e.message); }
     finally { setUploading(false); event.target.value = ""; }
@@ -192,7 +202,16 @@ function App() {
     try {
       await request(`/api/knowledge-bases/${knowledgeBaseId}`, { method: "DELETE" });
       setKnowledgeBaseId("");
+      setKnowledgeDocuments([]);
       localStorage.removeItem("knowledge_base_id");
+    } catch (deleteError) { setError(deleteError.message); }
+  }
+
+  async function removeKnowledgeDocument(document) {
+    if (!document.id || !window.confirm(`确定删除“${document.filename}”吗？其他文档会保留。`)) return;
+    try {
+      const data = await request(`/api/knowledge-bases/${knowledgeBaseId}/documents/${document.id}`, { method: "DELETE" });
+      setKnowledgeDocuments(data?.documents || []);
     } catch (deleteError) { setError(deleteError.message); }
   }
 
@@ -215,7 +234,7 @@ function App() {
         </div>)}
         {!conversations.length && <p className="empty">还没有会话，点击上方按钮开始吧</p>}
       </div>
-      <div className="knowledge"><span>企业知识库 <i>{knowledgeBaseId ? "已连接" : "未连接"}</i></span><small>{uploading ? "正在上传…" : knowledgeBaseId ? `ID · ${knowledgeBaseId.slice(0, 8)}…` : "尚未上传知识文档"}</small><div className="knowledge-actions"><label>{uploading ? "处理中" : "上传 TXT"}<input type="file" accept=".txt,text/plain" onChange={uploadDocument} disabled={uploading} /></label>{knowledgeBaseId && <button onClick={removeKnowledgeBase}>删除</button>}</div></div>
+      <div className="knowledge"><span>企业知识库 <i>{knowledgeBaseId ? "已连接" : "未连接"}</i></span>{uploading ? <small>正在解析并建立索引…</small> : knowledgeDocuments.length ? <ul className="knowledge-documents">{knowledgeDocuments.map((document, index) => <li key={document.id || `${document.filename}-${index}`} title={document.filename}><span>{document.filename}</span>{document.id && <button type="button" title={`删除 ${document.filename}`} aria-label={`删除 ${document.filename}`} onClick={() => removeKnowledgeDocument(document)}>×</button>}</li>)}</ul> : <small>尚未上传知识文档</small>}<div className="knowledge-actions"><label>{uploading ? "处理中" : knowledgeBaseId ? "继续添加" : "上传文档"}<input type="file" multiple accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={uploadDocument} disabled={uploading} /></label>{knowledgeBaseId && <button onClick={removeKnowledgeBase}>清空</button>}</div><small className="knowledge-hint">可单独删除文档，后续上传不会覆盖</small></div>
     </aside>
     <section className="chat-panel">
       <header><div><h1>{activeConversation?.title || "AI Workspace Agent"}</h1><p>{conversationId ? "会话已持久保存" : "创建会话，开始探索"}</p></div><div className="header-actions"><span className="agent-status">Agent 模式</span><span className={backendOnline ? "online" : "offline"}>● {backendOnline ? "在线" : "离线"}</span></div></header>

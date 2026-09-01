@@ -161,9 +161,10 @@ npm run dev
 | GET/POST | `/api/conversations` | 分页查询/创建会话 |
 | PATCH/DELETE | `/api/conversations/{id}` | 重命名/删除会话 |
 | GET | `/api/conversations/{id}/messages` | 分页恢复消息和 Trace |
-| POST | `/api/documents/upload` | 上传并索引 UTF-8 TXT 文档 |
+| POST | `/api/documents/upload` | 一次上传并索引多个 TXT、MD、DOCX、PDF 文档 |
 | POST | `/api/documents/search` | 直接检索知识库 |
 | GET/DELETE | `/api/knowledge-bases` | 查询/删除知识库 |
+| DELETE | `/api/knowledge-bases/{id}/documents/{document_id}` | 单独删除文档及其向量 |
 
 除健康检查外，配置 `APP_ACCESS_TOKEN` 后所有 `/api/*` 请求都需要 Bearer Token。
 
@@ -194,7 +195,7 @@ npm run build
 - MCP 子进程使用环境变量允许列表，且不经过 Shell 启动。
 - 本地工具使用 Pydantic，MCP 工具使用 JSON Schema 校验参数。
 - MCP Tool Result 被视为外部不可信数据。
-- 文档上传限制为 UTF-8 TXT、最大 1 MB，并进行基础注入标记检测。
+- 文档上传支持 TXT、Markdown、DOCX、电子 PDF 和扫描版 PDF；扫描页面自动使用离线中文 OCR（单份最多 30 页）。后续上传默认追加到当前知识库，不覆盖已有文档；单文件最大 10 MB、单次最多 10 个且总计不超过 30 MB，并进行基础注入标记检测。
 - API 返回通用错误，内部异常类型只写服务端日志。
 - 同一会话在单进程内串行执行，失败轮次回滚用户消息。
 - Agent 设有执行步数和每轮工具调用数量上限。

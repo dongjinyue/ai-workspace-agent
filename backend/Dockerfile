@@ -8,6 +8,11 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
+# RapidOCR 声明依赖桌面版 OpenCV；服务器容器改用 API 兼容的 headless 版本，
+# 避免引入 X11、OpenGL 等 OCR 不需要的桌面系统库。
+RUN pip uninstall --yes opencv-python \
+    && pip install --no-cache-dir opencv-python-headless==5.0.0.93
+
 COPY --chown=app:app app ./app
 COPY --chown=app:app mcp_servers ./mcp_servers
 

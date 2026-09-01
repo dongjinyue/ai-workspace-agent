@@ -21,8 +21,16 @@ def test_static_skills_automatically_supply_schemas_and_handlers():
     handlers = get_tool_handlers()
 
     assert {"time", "calculator", "knowledge", "mcp"} <= skill_names
-    assert {"calculator", "search_knowledge_base"} <= schema_names
-    assert {"calculator", "search_knowledge_base"} <= handlers.keys()
+    assert {
+        "calculator",
+        "search_knowledge_base",
+        "get_knowledge_base_info",
+    } <= schema_names
+    assert {
+        "calculator",
+        "search_knowledge_base",
+        "get_knowledge_base_info",
+    } <= handlers.keys()
 
 
 def test_registry_supports_dynamic_tool_registration():

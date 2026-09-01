@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.agent.service import AgentResult
+from app.agent.llm import ModelServiceUnavailableError
 from app.main import app
 from app.memory import repository
 from app.memory.database import get_database_path
@@ -235,3 +236,21 @@ def test_failed_agent_turn_rolls_back_user_message():
 
     assert response.status_code == 502
     assert repository.get_messages(conversation_id) == []
+
+
+def test_model_provider_failure_returns_safe_actionable_error():
+    """模型额度或鉴权失败时，不向前端泄漏供应商内部响应。"""
+    with patch(
+        "app.memory.service.run_agent",
+        side_effect=ModelServiceUnavailableError(
+            "模型服务暂时不可用，请检查 API Key、模型额度或稍后重试"
+        ),
+    ):
+        response = TestClient(app).post(
+            "/api/agent/chat", json={"message": "日期"}
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "模型服务暂时不可用，请检查 API Key、模型额度或稍后重试"
+    }

@@ -1,5 +1,6 @@
 import os
 import re
+from uuid import uuid4
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +65,9 @@ def add_chunks(
     knowledge_base_id: str,
     chunks: list[str],
     embeddings: list[list[float]],
+    *,
+    source_filename: str | None = None,
+    upload_batch: str | None = None,
 ) -> None:
     if len(chunks) != len(embeddings):
         raise ValueError("文本块数量与向量数量不一致")
@@ -72,11 +76,39 @@ def add_chunks(
 
     collection = get_collection(knowledge_base_id)
     collection.add(
-        ids=[f"chunk_{index}" for index in range(len(chunks))],
+        # UUID 避免向同一个知识库连续写入多份文档时发生 ID 冲突。
+        ids=[f"chunk_{uuid4().hex}" for _ in chunks],
         documents=chunks,
         embeddings=embeddings,
-        metadatas=[{"chunk_index": index} for index in range(len(chunks))],
+        metadatas=[
+            {
+                "chunk_index": index,
+                "source": source_filename or "unknown",
+                "upload_batch": upload_batch or "legacy",
+            }
+            for index in range(len(chunks))
+        ],
     )
+
+
+def delete_chunks_by_upload_batch(
+    knowledge_base_id: str,
+    upload_batch: str,
+) -> None:
+    """回滚一次追加上传产生的向量，不影响知识库中已有文档。"""
+    collection = find_collection(knowledge_base_id)
+    if collection is not None:
+        collection.delete(where={"upload_batch": upload_batch})
+
+
+def delete_chunks_by_source(
+    knowledge_base_id: str,
+    source_filename: str,
+) -> None:
+    """删除某份文档产生的全部向量块。"""
+    collection = find_collection(knowledge_base_id)
+    if collection is not None:
+        collection.delete(where={"source": source_filename})
 
 
 def search_chunks(
@@ -85,24 +117,48 @@ def search_chunks(
     *,
     top_k: int = 3,
     max_distance: float = 0.45,
+    query_text: str = "",
 ) -> list[SearchMatch]:
     collection = find_collection(knowledge_base_id)
     if collection is None or collection.count() == 0:
         return []
 
+    # 多取一些候选，用关键词重合度补救向量距离刚好越过阈值的中文短问题。
+    candidate_count = min(max(top_k * 4, 20), collection.count())
     result = collection.query(
         query_embeddings=[query_embedding],
-        n_results=min(top_k, collection.count()),
+        n_results=candidate_count,
         include=["documents", "distances"],
     )
 
     documents = (result.get("documents") or [[]])[0]
     distances = (result.get("distances") or [[]])[0]
 
-    return [
+    def lexical_score(document: str) -> float:
+        normalized_query = re.sub(
+            r"[\s，。！？、：；,.!?]|是什么|有什么|请问|一下|介绍|告诉我",
+            "",
+            query_text,
+        )
+        normalized_document = re.sub(r"\s+", "", document)
+        if len(normalized_query) < 2:
+            return 0.0
+        bigrams = {
+            normalized_query[index : index + 2]
+            for index in range(len(normalized_query) - 1)
+        }
+        if not bigrams:
+            return 0.0
+        return sum(item in normalized_document for item in bigrams) / len(bigrams)
+
+    matches = [
         SearchMatch(document=document, distance=float(distance))
         for document, distance in zip(documents, distances)
         if document is not None
         and distance is not None
-        and float(distance) <= max_distance
+        and (
+            float(distance) <= max_distance
+            or lexical_score(document) >= 0.35
+        )
     ]
+    return matches[:top_k]

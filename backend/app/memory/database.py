@@ -84,6 +84,37 @@ def init_database() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS knowledge_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                knowledge_base_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
+                upload_batch TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (knowledge_base_id)
+                    REFERENCES knowledge_bases(id) ON DELETE CASCADE
+            )
+            """
+        )
+        # 旧版按文件名删除向量；同名文件会被一起删除。新增批次列后可精确删除一次上传。
+        document_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(knowledge_documents)"
+            ).fetchall()
+        }
+        if "upload_batch" not in document_columns:
+            connection.execute(
+                "ALTER TABLE knowledge_documents ADD COLUMN upload_batch TEXT"
+            )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_knowledge_documents_base_id
+            ON knowledge_documents (knowledge_base_id, id)
+            """
+        )
         # 兼容旧数据库，在不丢失已有会话的前提下补充标题列。
         columns = {
             row["name"]

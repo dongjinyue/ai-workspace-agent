@@ -8,23 +8,33 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BACKEND_DIR / ".env")
 
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from app.memory.database import init_database
+from app.agent.llm import ModelServiceUnavailableError
 from app.memory.service import ConversationNotFoundError, ConversationService
 from app.observability import configure_logging
 from app.rag.service import index_document, semantic_search
+from app.rag.document_parser import DocumentParseError, parse_document
 from app.rag.catalog import (
+    append_knowledge_documents,
+    delete_knowledge_document as delete_knowledge_document_metadata,
     delete_knowledge_base as delete_knowledge_base_metadata,
+    get_knowledge_base,
+    get_knowledge_document,
     knowledge_base_exists,
     list_knowledge_bases as list_knowledge_base_metadata,
     register_knowledge_base,
 )
-from app.rag.vector_store import delete_collection
+from app.rag.vector_store import (
+    delete_chunks_by_source,
+    delete_chunks_by_upload_batch,
+    delete_collection,
+)
 from app.security import (
     InMemoryRateLimiter,
     PromptInjectionError,
@@ -105,7 +115,9 @@ class ConversationUpdateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=60)
 
 
-MAX_FILE_SIZE = 1024 * 1024
+MAX_FILE_SIZE = 10 * 1024 * 1024
+MAX_UPLOAD_SIZE = 30 * 1024 * 1024
+MAX_FILES_PER_UPLOAD = 10
 
 
 def find_relevant_chunks(knowledge_base_id: str | None, query: str):
@@ -183,6 +195,8 @@ def _chat(request: ChatRequest):
 
     except ConversationNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except ModelServiceUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(
             status_code=502,
@@ -271,52 +285,103 @@ def delete_conversation(conversation_id: str):
 
 
 @app.post("/api/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
-    filename = file.filename or ""
-    if not filename.lower().endswith(".txt"):
-        raise HTTPException(status_code=400, detail="目前只支持 TXT 文件")
+async def upload_document(
+    files: list[UploadFile] = File(default=[]),
+    file: UploadFile | None = File(default=None),
+    knowledge_base_id: str | None = Form(default=None),
+):
+    """把一次选择的多份文档索引到同一个知识库，并兼容旧版单文件字段。"""
+    uploaded_files = [*files, *([file] if file is not None else [])]
+    if not uploaded_files:
+        raise HTTPException(status_code=400, detail="请选择至少一个文档")
+    if len(uploaded_files) > MAX_FILES_PER_UPLOAD:
+        raise HTTPException(status_code=400, detail="一次最多上传 10 个文档")
 
-    content = await file.read(MAX_FILE_SIZE + 1)
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="TXT 文件不能超过 1 MB")
+    parsed_documents: list[tuple[str, str]] = []
+    total_size = 0
+    for uploaded_file in uploaded_files:
+        # Path.name 去掉浏览器可能传入的目录信息，仅保留安全展示名称。
+        filename = Path(uploaded_file.filename or "").name
+        content = await uploaded_file.read(MAX_FILE_SIZE + 1)
+        total_size += len(content)
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"{filename or '文档'} 不能超过 10 MB",
+            )
+        if total_size > MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail="单次上传总大小不能超过 30 MB")
+        if not content:
+            raise HTTPException(status_code=400, detail=f"{filename or '文档'} 内容为空")
+        try:
+            text = await run_in_threadpool(parse_document, filename, content)
+        except DocumentParseError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if not text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail=f"无法从 {filename} 识别有效文字；请确认扫描清晰、方向正确且页数不超过限制",
+            )
+        parsed_documents.append((filename, text))
 
-    if not content:
-        raise HTTPException(status_code=400, detail="上传的文件为空")
+    is_new_knowledge_base = knowledge_base_id is None
+    if knowledge_base_id is not None and not knowledge_base_exists(knowledge_base_id):
+        raise HTTPException(status_code=404, detail="要追加的知识库不存在")
+    knowledge_base_id = knowledge_base_id or uuid4().hex
+    upload_batch = uuid4().hex
+    document_metadata: list[dict[str, str | int]] = []
+
+    def rollback_upload() -> None:
+        if is_new_knowledge_base:
+            delete_collection(knowledge_base_id)
+        else:
+            delete_chunks_by_upload_batch(knowledge_base_id, upload_batch)
 
     try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise HTTPException(
-            status_code=400,
-            detail="TXT 文件必须使用 UTF-8 编码",
-        ) from error
-
-    knowledge_base_id = uuid4().hex
-    try:
-        chunk_count = await run_in_threadpool(
-            index_document,
-            knowledge_base_id,
-            text,
-        )
+        for filename, text in parsed_documents:
+            chunk_count = await run_in_threadpool(
+                index_document,
+                knowledge_base_id,
+                text,
+                filename,
+                upload_batch,
+            )
+            if chunk_count == 0:
+                raise DocumentParseError(f"{filename} 中没有可用的文本内容")
+            document_metadata.append(
+                {
+                    "filename": filename,
+                    "chunk_count": chunk_count,
+                    # 保存批次标识，删除同名文档时只删除用户选中的那一次上传。
+                    "upload_batch": upload_batch,
+                }
+            )
     except PromptInjectionError as error:
+        rollback_upload()
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except DocumentParseError as error:
+        rollback_upload()
         raise HTTPException(status_code=400, detail=str(error)) from error
     except RuntimeError as error:
+        rollback_upload()
         raise HTTPException(status_code=502, detail="文档处理服务暂时不可用") from error
 
-    if chunk_count == 0:
-        raise HTTPException(status_code=400, detail="文件中没有可用的文本内容")
-
     try:
-        register_knowledge_base(knowledge_base_id, filename, chunk_count)
+        if is_new_knowledge_base:
+            register_knowledge_base(knowledge_base_id, document_metadata)
+        else:
+            append_knowledge_documents(knowledge_base_id, document_metadata)
     except Exception:
-        # 元数据保存失败时回收刚创建的向量，避免不可管理的孤儿数据。
-        delete_collection(knowledge_base_id)
+        # 元数据保存失败时只回收本批次向量，已有知识库不受影响。
+        rollback_upload()
         raise HTTPException(status_code=500, detail="知识库元数据保存失败")
 
+    knowledge_base = get_knowledge_base(knowledge_base_id)
     return {
         "success": True,
-        "filename": filename,
-        "chunks": chunk_count,
+        "documents": knowledge_base["documents"] if knowledge_base else document_metadata,
+        "added_documents": document_metadata,
+        "chunks": knowledge_base["chunk_count"] if knowledge_base else 0,
         "knowledge_base_id": knowledge_base_id,
     }
 
@@ -340,3 +405,25 @@ def delete_knowledge_base(knowledge_base_id: str):
         raise HTTPException(status_code=404, detail="知识库不存在")
     delete_collection(knowledge_base_id)
     delete_knowledge_base_metadata(knowledge_base_id)
+
+
+@app.delete("/api/knowledge-bases/{knowledge_base_id}/documents/{document_id}")
+def delete_knowledge_document(knowledge_base_id: str, document_id: int):
+    """只删除选中的文档及其向量，不影响同一知识库中的其他文档。"""
+    document = get_knowledge_document(knowledge_base_id, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    try:
+        if document.get("upload_batch"):
+            delete_chunks_by_upload_batch(
+                knowledge_base_id,
+                document["upload_batch"],
+            )
+        else:
+            # 兼容升级前没有批次标识的旧记录。
+            delete_chunks_by_source(knowledge_base_id, document["filename"])
+    except Exception as error:
+        raise HTTPException(status_code=500, detail="文档向量删除失败") from error
+    if not delete_knowledge_document_metadata(knowledge_base_id, document_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return get_knowledge_base(knowledge_base_id)

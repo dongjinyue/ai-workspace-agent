@@ -172,7 +172,11 @@ def run_agent(
         }
     )
     answer = result.get("final_answer") or _message_content(result["messages"][-1])
-    if not answer:
+    # 兼容模型偶发返回省略号或纯标点；这种内容不能作为成功回答保存。
+    meaningful_answer = "".join(
+        character for character in str(answer or "") if character.isalnum()
+    )
+    if not meaningful_answer:
         raise RuntimeError("工作流没有生成最终回答")
 
     tools_used = result["tools_used"]
@@ -181,8 +185,6 @@ def run_agent(
         source_text = "\n\n".join(result["retrieved_chunks"])
         if result["active_skill"] == "policy_summary" and source_text:
             answer = _ground_policy_summary(answer, result["retrieved_chunks"])
-        elif source_text and answer.strip() not in source_text:
-            answer = source_text
     return AgentResult(
         answer=answer,
         tool_called=bool(tools_used),
