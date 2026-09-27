@@ -35,37 +35,43 @@ def _agent_result(answer: str = "明白。") -> AgentResult:
 
 
 def test_conversation_and_messages_persist_in_sqlite():
-    conversation_id = repository.create_conversation()
-    repository.save_message(conversation_id, "user", "我的代号是 BlueFox。")
+    conversation_id = repository.create_conversation(owner_id="admin")
+    repository.save_message(
+        conversation_id, "user", "我的代号是 BlueFox。", owner_id="admin"
+    )
 
     # 每次仓库调用都会重新打开连接，因此这里也验证了磁盘持久化。
     assert get_database_path().is_file()
-    assert repository.conversation_exists(conversation_id)
-    assert repository.get_messages(conversation_id)[0]["content"] == (
+    assert repository.conversation_exists(conversation_id, owner_id="admin")
+    assert repository.get_messages(conversation_id, owner_id="admin")[0]["content"] == (
         "我的代号是 BlueFox。"
     )
 
 
 def test_conversations_are_strictly_isolated():
-    conversation_a = repository.create_conversation()
-    conversation_b = repository.create_conversation()
-    repository.save_message(conversation_a, "user", "苹果")
-    repository.save_message(conversation_b, "user", "香蕉")
+    conversation_a = repository.create_conversation(owner_id="admin")
+    conversation_b = repository.create_conversation(owner_id="admin")
+    repository.save_message(conversation_a, "user", "苹果", owner_id="admin")
+    repository.save_message(conversation_b, "user", "香蕉", owner_id="admin")
 
-    assert [m["content"] for m in repository.get_messages(conversation_a)] == [
-        "苹果"
-    ]
-    assert [m["content"] for m in repository.get_messages(conversation_b)] == [
-        "香蕉"
-    ]
+    assert [
+        m["content"]
+        for m in repository.get_messages(conversation_a, owner_id="admin")
+    ] == ["苹果"]
+    assert [
+        m["content"]
+        for m in repository.get_messages(conversation_b, owner_id="admin")
+    ] == ["香蕉"]
 
 
 def test_sliding_window_returns_latest_20_in_chronological_order():
-    conversation_id = repository.create_conversation()
+    conversation_id = repository.create_conversation(owner_id="admin")
     for index in range(25):
-        repository.save_message(conversation_id, "user", f"message-{index}")
+        repository.save_message(
+            conversation_id, "user", f"message-{index}", owner_id="admin"
+        )
 
-    messages = repository.get_messages(conversation_id, limit=20)
+    messages = repository.get_messages(conversation_id, limit=20, owner_id="admin")
     assert len(messages) == 20
     assert messages[0]["content"] == "message-5"
     assert messages[-1]["content"] == "message-24"
@@ -92,7 +98,7 @@ def test_current_user_message_enters_agent_context_once_and_tools_are_not_saved(
     ]
     assert len(current_messages) == 1
     assert result.history_messages == 1
-    stored = repository.get_messages(result.conversation_id)
+    stored = repository.get_messages(result.conversation_id, owner_id="admin")
     assert [item["role"] for item in stored] == ["user", "assistant"]
 
 
@@ -107,11 +113,14 @@ def test_unknown_conversation_is_rejected_instead_of_created():
 
 
 def test_message_content_is_saved_as_data_not_executed_as_sql():
-    conversation_id = repository.create_conversation()
+    conversation_id = repository.create_conversation(owner_id="admin")
     payload = "'); DROP TABLE conversations; --"
-    repository.save_message(conversation_id, "user", payload)
-    assert repository.get_messages(conversation_id)[0]["content"] == payload
-    assert repository.conversation_exists(conversation_id)
+    repository.save_message(conversation_id, "user", payload, owner_id="admin")
+    assert (
+        repository.get_messages(conversation_id, owner_id="admin")[0]["content"]
+        == payload
+    )
+    assert repository.conversation_exists(conversation_id, owner_id="admin")
 
 
 def test_chat_api_reuses_conversation_and_history_api_restores_messages():
@@ -162,7 +171,7 @@ def test_conversation_crud_api_persists_title_and_deletes_messages():
     created = client.post("/api/conversations", json={"title": "项目讨论"})
     assert created.status_code == 201
     conversation_id = created.json()["id"]
-    repository.save_message(conversation_id, "user", "测试消息")
+    repository.save_message(conversation_id, "user", "测试消息", owner_id="admin")
 
     listed = client.get("/api/conversations")
     assert listed.status_code == 200
@@ -177,7 +186,7 @@ def test_conversation_crud_api_persists_title_and_deletes_messages():
 
     deleted = client.delete(f"/api/conversations/{conversation_id}")
     assert deleted.status_code == 204
-    assert not repository.conversation_exists(conversation_id)
+    assert not repository.conversation_exists(conversation_id, owner_id="admin")
 
 
 def test_cors_allows_vite_fallback_development_port():
@@ -206,10 +215,10 @@ def test_agent_chat_endpoint_keeps_conversation_memory():
 
     assert response.status_code == 200
     conversation_id = response.json()["conversation_id"]
-    assert [item["role"] for item in repository.get_messages(conversation_id)] == [
-        "user",
-        "assistant",
-    ]
+    assert [
+        item["role"]
+        for item in repository.get_messages(conversation_id, owner_id="admin")
+    ] == ["user", "assistant"]
 
 
 def test_legacy_chat_endpoint_also_uses_agent_tools():
@@ -224,7 +233,7 @@ def test_legacy_chat_endpoint_also_uses_agent_tools():
 
 
 def test_failed_agent_turn_rolls_back_user_message():
-    conversation_id = repository.create_conversation()
+    conversation_id = repository.create_conversation(owner_id="admin")
     with patch(
         "app.memory.service.run_agent",
         side_effect=RuntimeError("provider unavailable"),
@@ -235,7 +244,7 @@ def test_failed_agent_turn_rolls_back_user_message():
         )
 
     assert response.status_code == 502
-    assert repository.get_messages(conversation_id) == []
+    assert repository.get_messages(conversation_id, owner_id="admin") == []
 
 
 def test_model_provider_failure_returns_safe_actionable_error():

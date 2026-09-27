@@ -124,3 +124,12 @@ def init_database() -> None:
             connection.execute(
                 "ALTER TABLE conversations ADD COLUMN title TEXT NOT NULL DEFAULT '新会话'"
             )
+        # 旧记录只可能来自原有单管理员版本，迁移后明确归管理员所有。
+        if "owner_id" not in columns:
+            connection.execute(
+                "ALTER TABLE conversations ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'admin'"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_owner_updated "
+            "ON conversations (owner_id, updated_at DESC)"
+        )
