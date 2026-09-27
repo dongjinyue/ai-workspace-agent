@@ -1,8 +1,8 @@
+from datetime import datetime, timedelta, timezone
 import os
 import re
 from pathlib import Path
 from uuid import uuid4
-from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -31,6 +31,12 @@ from app.auth import AuthenticationError, Principal, resolve_principal
 from app.agent.llm import ModelServiceUnavailableError
 from app.memory.service import ConversationNotFoundError, ConversationService
 from app.observability import configure_logging
+from app.quotas import (
+    GuestQuotaExceeded,
+    get_guest_quota_status,
+    hash_client_ip,
+    reserve_guest_ai_request,
+)
 from app.rag.service import index_document, semantic_search
 from app.rag.document_parser import DocumentParseError, parse_document
 from app.rag.catalog import (
@@ -199,32 +205,65 @@ def health_check():
 
 @app.get("/api/session")
 def get_session(principal: Principal = Depends(get_current_principal)):
-    """返回服务端识别的身份；后续额度由持久化配额服务填充。"""
+    """返回服务端身份和不扣次的当前访客额度。"""
     quota = None
     if principal.role == "guest":
-        # 中国大陆全年固定 UTC+8，不依赖 Windows/Linux 的 tzdata 安装包。
-        shanghai = timezone(timedelta(hours=8), name="Asia/Shanghai")
-        reset_at = datetime.now(shanghai).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) + timedelta(days=1)
-        quota = {"remaining": 10, "limit": 10, "reset_at": reset_at.isoformat()}
+        if not principal.guest_session_hash:
+            raise HTTPException(status_code=503, detail="访客额度服务暂时不可用")
+        status = get_guest_quota_status(
+            principal.guest_session_hash, datetime.now(timezone.utc)
+        )
+        quota = {
+            "remaining": status.remaining,
+            "limit": status.limit,
+            "reset_at": status.reset_at.isoformat(),
+        }
     return {"role": principal.role, "quota": quota}
 
 
 @app.post("/api/chat")
 def chat(
     request: ChatRequest,
+    http_request: Request,
     principal: Principal = Depends(get_current_principal),
 ):
     """兼容旧客户端；所有聊天请求统一进入 Agent 执行链。"""
-    return _chat(request, principal)
+    return _chat(request, principal, http_request)
 
 
-def _chat(request: ChatRequest, principal: Principal):
+def _chat(request: ChatRequest, principal: Principal, http_request: Request):
     message = request.message.strip()
 
     if not message:
         raise HTTPException(status_code=400, detail="消息不能为空")
+
+    if principal.role == "guest":
+        if not principal.guest_session_hash:
+            raise HTTPException(status_code=503, detail="访客额度服务暂时不可用")
+        try:
+            reserve_guest_ai_request(
+                principal.guest_session_hash,
+                hash_client_ip(http_request),
+                datetime.now(timezone.utc),
+            )
+        except GuestQuotaExceeded as error:
+            retry_seconds = max(
+                1,
+                int(
+                    (
+                        error.retry_at.astimezone(timezone.utc)
+                        - datetime.now(timezone.utc)
+                    ).total_seconds()
+                ),
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="访客 AI 请求额度已达上限，请在额度恢复后重试",
+                headers={
+                    "Retry-After": str(retry_seconds),
+                    "X-Quota-Reset": error.retry_at.isoformat(),
+                },
+            ) from error
 
     try:
         turn = conversation_service.chat(
@@ -266,10 +305,11 @@ def _chat(request: ChatRequest, principal: Principal):
 @app.post("/api/agent/chat")
 def agent_chat(
     request: ChatRequest,
+    http_request: Request,
     principal: Principal = Depends(get_current_principal),
 ):
     """Agent 模式允许模型自主选择经过注册和校验的工具。"""
-    return _chat(request, principal)
+    return _chat(request, principal, http_request)
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

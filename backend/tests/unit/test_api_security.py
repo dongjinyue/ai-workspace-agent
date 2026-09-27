@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -10,7 +11,11 @@ from starlette.responses import Response
 from app import main
 from app.auth import AuthenticationError
 from app.main import app
+from app.auth import Principal
+from app.agent.llm import ModelServiceUnavailableError
+from app.main import ChatRequest
 from app.memory import repository
+from app.quotas import GuestQuotaExceeded
 from app.security import InMemoryRateLimiter
 
 
@@ -128,6 +133,86 @@ def test_browser_write_requires_an_allowed_origin(monkeypatch):
 
     assert rejected.status_code == 403
     assert accepted.status_code == 201
+
+
+def test_both_chat_routes_stop_before_agent_when_guest_quota_is_exhausted(monkeypatch):
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    retry_at = datetime.now(timezone.utc) + timedelta(minutes=3)
+    for path in ("/api/chat", "/api/agent/chat"):
+        with TestClient(app) as client:
+            assert client.get("/api/session").status_code == 200
+            with (
+                patch.object(
+                    main,
+                    "reserve_guest_ai_request",
+                    side_effect=GuestQuotaExceeded(retry_at),
+                ) as reserve,
+                patch.object(main.conversation_service, "chat") as chat,
+            ):
+                response = client.post(
+                    path,
+                    json={"message": "应该被额度拦截"},
+                    headers={"Origin": "http://localhost:3000"},
+                )
+
+        assert response.status_code == 429
+        assert int(response.headers["retry-after"]) > 0
+        assert response.headers["x-quota-reset"] == retry_at.isoformat()
+        reserve.assert_called_once()
+        chat.assert_not_called()
+
+
+def test_admin_bypasses_guest_quota(monkeypatch):
+    request = main.Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/agent/chat",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+        }
+    )
+    with (
+        patch.object(
+            main,
+            "reserve_guest_ai_request",
+            side_effect=AssertionError("管理员不应消耗访客额度"),
+        ) as reserve,
+        patch.object(
+            main.conversation_service,
+            "chat",
+            side_effect=ModelServiceUnavailableError("模型暂不可用"),
+        ),
+        pytest.raises(HTTPException) as error,
+    ):
+        main._chat(
+            ChatRequest(message="管理员请求"),
+            Principal(role="admin", owner_id="admin"),
+            request,
+        )
+
+    assert error.value.status_code == 503
+    reserve.assert_not_called()
+
+
+def test_accepted_guest_request_consumes_quota_even_if_model_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "failed-chat.db"))
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    with TestClient(app) as client:
+        session = client.get("/api/session")
+        assert session.json()["quota"]["remaining"] == 10
+        with patch(
+            "app.memory.service.run_agent", side_effect=RuntimeError("temporary failure")
+        ):
+            failed = client.post(
+                "/api/agent/chat",
+                json={"message": "计入已接受请求"},
+                headers={"Origin": "http://localhost:3000"},
+            )
+        refreshed = client.get("/api/session")
+
+    assert failed.status_code == 502
+    assert refreshed.json()["quota"]["remaining"] == 9
 
 
 def test_rate_limiter_rejects_requests_over_limit():

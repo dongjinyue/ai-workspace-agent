@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from app.memory.database import get_connection, init_database
@@ -7,6 +7,87 @@ from app.memory.database import get_connection, init_database
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def get_guest_ai_request_count(session_hash: str, local_date: str) -> int:
+    """读取指定访客会话在上海自然日内已接受的 AI 请求数。"""
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS total FROM guest_ai_events "
+            "WHERE session_hash = ? AND local_date = ?",
+            (session_hash, local_date),
+        ).fetchone()
+    return int(row["total"])
+
+
+def reserve_guest_ai_event(
+    session_hash: str,
+    ip_hash: str,
+    now: datetime,
+    local_date: str,
+    day_reset: datetime,
+    *,
+    session_limit: int,
+    ip_minute_limit: int,
+    ip_day_limit: int,
+) -> tuple[bool, int, datetime | None]:
+    """串行检查所有访客额度并记账，避免并发请求抢占同一个剩余额度。"""
+    init_database()
+    now_utc = now.astimezone(timezone.utc)
+    now_iso = now_utc.isoformat(timespec="microseconds")
+    minute_cutoff = (now_utc - timedelta(seconds=60)).isoformat(
+        timespec="microseconds"
+    )
+    retention_cutoff = (now_utc - timedelta(days=2)).isoformat(
+        timespec="microseconds"
+    )
+
+    with get_connection() as connection:
+        # 在统计之前获取 SQLite 写锁，让检查+插入作为一个原子操作。
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DELETE FROM guest_ai_events WHERE requested_at < ?",
+            (retention_cutoff,),
+        )
+        session_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS total FROM guest_ai_events "
+                "WHERE session_hash = ? AND local_date = ?",
+                (session_hash, local_date),
+            ).fetchone()["total"]
+        )
+        ip_day_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS total FROM guest_ai_events "
+                "WHERE ip_hash = ? AND local_date = ?",
+                (ip_hash, local_date),
+            ).fetchone()["total"]
+        )
+        minute_rows = connection.execute(
+            "SELECT requested_at FROM guest_ai_events "
+            "WHERE ip_hash = ? AND requested_at > ? AND requested_at <= ? "
+            "ORDER BY requested_at ASC",
+            (ip_hash, minute_cutoff, now_iso),
+        ).fetchall()
+
+        retry_at: datetime | None = None
+        if session_count >= session_limit or ip_day_count >= ip_day_limit:
+            retry_at = day_reset
+        if len(minute_rows) >= ip_minute_limit:
+            minute_reset = datetime.fromisoformat(
+                minute_rows[0]["requested_at"]
+            ) + timedelta(seconds=60)
+            retry_at = max(retry_at, minute_reset) if retry_at else minute_reset
+        if retry_at is not None:
+            return False, session_count, retry_at
+
+        connection.execute(
+            "INSERT INTO guest_ai_events "
+            "(session_hash, ip_hash, requested_at, local_date) VALUES (?, ?, ?, ?)",
+            (session_hash, ip_hash, now_iso, local_date),
+        )
+        return True, session_count + 1, None
 
 
 def create_conversation(title: str = "新会话", *, owner_id: str) -> str:

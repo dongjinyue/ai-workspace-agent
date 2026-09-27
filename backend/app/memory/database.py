@@ -133,3 +133,27 @@ def init_database() -> None:
             "CREATE INDEX IF NOT EXISTS idx_conversations_owner_updated "
             "ON conversations (owner_id, updated_at DESC)"
         )
+        # 仅保留 HMAC 摘要与时间戳，不保存原始 IP、问题或模型内容。
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guest_ai_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_hash TEXT NOT NULL,
+                ip_hash TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                local_date TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guest_ai_session_day "
+            "ON guest_ai_events (session_hash, local_date)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guest_ai_ip_day "
+            "ON guest_ai_events (ip_hash, local_date)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_guest_ai_ip_time "
+            "ON guest_ai_events (ip_hash, requested_at)"
+        )
