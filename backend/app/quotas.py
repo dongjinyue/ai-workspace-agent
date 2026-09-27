@@ -13,9 +13,9 @@ from app.memory import repository
 
 
 SHANGHAI_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
-GUEST_SESSION_DAILY_LIMIT = 10
-IP_ROLLING_MINUTE_LIMIT = 5
-IP_DAILY_LIMIT = 30
+GUEST_SESSION_DAILY_LIMIT = int(os.getenv("GUEST_DAILY_AI_LIMIT", "10"))
+IP_ROLLING_MINUTE_LIMIT = int(os.getenv("IP_AI_LIMIT_PER_MINUTE", "5"))
+IP_DAILY_LIMIT = int(os.getenv("IP_AI_LIMIT_PER_DAY", "30"))
 
 
 @dataclass(frozen=True)
@@ -46,7 +46,7 @@ def _day_window(now: datetime) -> tuple[str, datetime]:
 
 
 def _ip_hash(ip_address: str) -> str:
-    key = os.getenv("GUEST_SESSION_HMAC_KEY", "").encode("utf-8")
+    key = os.getenv("IP_HASH_HMAC_KEY", "").encode("utf-8")
     if len(key) < 32:
         raise RuntimeError("访客额度服务尚未配置安全密钥")
     # 只将带用途前缀的 HMAC 摘要写入数据库，避免保存可还原的原始 IP。

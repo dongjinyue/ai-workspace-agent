@@ -20,6 +20,11 @@ from app.security import InMemoryRateLimiter
 from app.rag.catalog import register_knowledge_base
 
 
+@pytest.fixture(autouse=True)
+def configure_ip_hash_key_for_tests(monkeypatch):
+    monkeypatch.setenv("IP_HASH_HMAC_KEY", "i" * 40)
+
+
 def test_public_session_is_guest_and_legacy_access_token_is_not_required(monkeypatch):
     monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
     monkeypatch.setenv("APP_ACCESS_TOKEN", "legacy-token")

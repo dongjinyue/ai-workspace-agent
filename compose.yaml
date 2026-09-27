@@ -3,7 +3,7 @@ services:
     build:
       context: ./backend
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - ./backend/.env
     volumes:
@@ -26,9 +26,9 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/backend}
     ports:
-      - "5173:8080"
+      - "127.0.0.1:5173:8080"
     depends_on:
       backend:
         condition: service_healthy

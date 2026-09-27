@@ -146,6 +146,7 @@ def test_quota_database_stores_only_ip_digest_not_raw_address(tmp_path, monkeypa
     database_path = tmp_path / "private-ip.db"
     monkeypatch.setenv("APP_DATABASE_PATH", str(database_path))
     monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    monkeypatch.setenv("IP_HASH_HMAC_KEY", "i" * 40)
     monkeypatch.setenv("TRUSTED_PROXY_IPS", "127.0.0.1")
     raw_ip = "203.0.113.25"
     ip_hash = hash_client_ip(
@@ -160,3 +161,11 @@ def test_quota_database_stores_only_ip_digest_not_raw_address(tmp_path, monkeypa
 
     assert stored_ip_hash == ip_hash
     assert raw_ip not in stored_ip_hash
+
+
+def test_ip_hash_requires_its_own_key(monkeypatch):
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    monkeypatch.delenv("IP_HASH_HMAC_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="安全密钥"):
+        hash_client_ip(_request("127.0.0.1", []))

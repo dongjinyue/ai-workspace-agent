@@ -92,7 +92,7 @@ frontend/
 Copy-Item backend/.env.example backend/.env
 ```
 
-编辑 `backend/.env`，至少填写新的 `DASHSCOPE_API_KEY`。公开部署时还必须设置高强度随机 `APP_ACCESS_TOKEN` 和正式 `CORS_ALLOWED_ORIGINS`。
+编辑 `backend/.env`，至少填写 `DASHSCOPE_API_KEY`、Supabase 项目公开 URL/Publishable Key 和唯一管理员用户 UUID。公开部署还需要分别生成两个不同的随机 HMAC 密钥，并填写可信 Nginx 地址与允许的 HTTPS 来源。`backend/.env.example` 已列出变量；真实 `.env` 只放服务器，不提交 Git。
 
 不要把 `.env`、密钥、SQLite 文件或 Chroma 数据提交到 Git。
 
@@ -119,13 +119,15 @@ docker compose down
 
 `logs --follow` 会持续显示日志；`down` 会停止并删除容器，但不会删除 `backend/data` 中的 SQLite 和 Chroma 持久化数据。
 
-启动后访问：
+Compose 端口只绑定本机回环地址，因此启动后本机可访问：
 
 - 前端：http://localhost:5173
 - 健康检查：http://localhost:8000/api/health
 - OpenAPI：http://localhost:8000/docs
 
-如果配置了 `APP_ACCESS_TOKEN`，前端会显示访问令牌输入页。令牌只保存在当前浏览器标签页的 Session Storage（会话存储）中。
+访客无需访问令牌，首次打开时由服务器签发 HttpOnly Cookie（浏览器脚本不可读取的会话标识）。访客每个浏览器会话每天可提问 10 次；同一来源 IP 额外受每分钟 5 次、北京时间每天 30 次限制。管理员通过 Supabase 邮箱/密码登录，只有与 `ADMIN_USER_ID` 完全匹配的账号拥有管理权限；访客不能注册。浏览器只保存当前标签页的管理员登录状态。
+
+使用 Docker Compose 本地启动时，前端 API 地址默认是同域路径 `/backend`，适用于由 Nginx 将 `/backend/` 转发到 `127.0.0.1:8000` 的部署结构。纯本地访问 Compose 时，可在项目根目录 `.env` 中将 `VITE_API_BASE_URL=http://localhost:8000`，然后重新构建前端镜像；Vite 本地开发默认直接连接 `http://127.0.0.1:8000`。
 
 ### 3. 本地开发
 
@@ -166,7 +168,7 @@ npm run dev
 | GET/DELETE | `/api/knowledge-bases` | 查询/删除知识库 |
 | DELETE | `/api/knowledge-bases/{id}/documents/{document_id}` | 单独删除文档及其向量 |
 
-除健康检查外，配置 `APP_ACCESS_TOKEN` 后所有 `/api/*` 请求都需要 Bearer Token。
+浏览器访客请求自动携带 HttpOnly Cookie；管理员请求附带 Supabase access token（访问令牌），后端再通过 Supabase 验证用户并比对唯一管理员 UUID。健康检查不包含密钥或用户资料。
 
 ## 测试与评测
 
@@ -191,7 +193,11 @@ npm run build
 
 ## 安全设计
 
-- 密钥只从后端环境变量读取，`.env` 被 Git 和 Docker Build Context 排除。
+- 模型密钥、访客 Cookie 签名密钥和 IP 摘要密钥只从后端环境变量读取；两个 HMAC 密钥必须独立。`.env` 被 Git 和 Docker Build Context 排除。
+- 生产模式 `APP_ENV=production` 会在启动时检查 Supabase、管理员 UUID、至少 32 字节的独立密钥、HTTPS 来源、可信代理网段、正整数限额与 Secure Cookie；缺少或不安全时拒绝启动。
+- 访客对话和额度账本以 SQLite 持久化；IP 只保存独立密钥生成的 HMAC 摘要。限额是滥用防护，不是模型费用的绝对上限或身份验证。
+- 默认不向访客公开任何知识库；管理员必须通过 `PUBLIC_KNOWLEDGE_BASE_IDS` 明确列出允许访客检索的知识库 ID。访客不能上传或删除内容，只能使用审核过的只读工具。
+- Compose 的前后端端口仅绑定 `127.0.0.1`，应由现有 Nginx 处理 HTTPS 和反向代理；不要为此向公网开放新的应用端口。
 - MCP 子进程使用环境变量允许列表，且不经过 Shell 启动。
 - 本地工具使用 Pydantic，MCP 工具使用 JSON Schema 校验参数。
 - MCP Tool Result 被视为外部不可信数据。
@@ -203,7 +209,7 @@ npm run build
 
 ## 已知边界
 
-- `APP_ACCESS_TOKEN` 是单用户部署保护，不是完整多租户认证。多用户版本必须增加用户表、登录流程和会话/知识库所有权检查。
+- IP 配额按反向代理确认的客户端 IP 汇总；共享网络用户会共用 IP 限额，移动网络或 VPN 切换地址可能重新计数。访客 Cookie 清除/换浏览器也可能更换会话身份，因此 IP 限额是补充防护而非绝对防刷或费用保证。
 - SQLite 与进程内限流适合单实例作品集部署；多副本环境应改用共享数据库、Redis 限流和分布式锁。
 - Prompt Injection 检测是多层缓解措施，不保证识别所有变体。
 - 当前 RAG 以向量检索和严格原文约束为主，后续可增加引用、混合检索和 Reranker。
