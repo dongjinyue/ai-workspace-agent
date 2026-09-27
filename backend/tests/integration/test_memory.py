@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 
 from app.agent.service import AgentResult
 from app.agent.llm import ModelServiceUnavailableError
+from app.auth import Principal
 from app.main import app
+from app.main import get_current_principal
 from app.memory import repository
 from app.memory.database import get_database_path
 from app.memory.service import ConversationNotFoundError, ConversationService
@@ -18,7 +20,13 @@ pytestmark = pytest.mark.integration
 def clean_test_database():
     path = get_database_path()
     path.unlink(missing_ok=True)
+    # 这些回归测试模拟已登录管理员，明确沿用旧数据 owner_id="admin"。
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_current_principal] = lambda: Principal(
+        role="admin", owner_id="admin"
+    )
     yield
+    app.dependency_overrides.clear()
     path.unlink(missing_ok=True)
 
 
@@ -89,6 +97,7 @@ def test_current_user_message_enters_agent_context_once_and_tools_are_not_saved(
             message="我正在学习 LangGraph",
             knowledge_base_id=None,
             conversation_id=None,
+            owner_id="admin",
         )
 
     current_messages = [
@@ -104,7 +113,7 @@ def test_current_user_message_enters_agent_context_once_and_tools_are_not_saved(
 
 def test_unknown_conversation_is_rejected_instead_of_created():
     with pytest.raises(ConversationNotFoundError):
-        ConversationService().resolve_conversation("0" * 32)
+        ConversationService().resolve_conversation("0" * 32, owner_id="admin")
 
     response = TestClient(app).get(
         "/api/conversations/00000000000000000000000000000000/messages"
@@ -124,7 +133,7 @@ def test_message_content_is_saved_as_data_not_executed_as_sql():
 
 
 def test_chat_api_reuses_conversation_and_history_api_restores_messages():
-    client = TestClient(app)
+    client = TestClient(app, headers={"Origin": "http://localhost:3000"})
     captured_histories = []
 
     def fake_run_agent(**kwargs):
@@ -167,7 +176,7 @@ def test_chat_api_reuses_conversation_and_history_api_restores_messages():
 
 def test_conversation_crud_api_persists_title_and_deletes_messages():
     """会话列表、重命名和级联删除都应由 SQLite 持久保存。"""
-    client = TestClient(app)
+    client = TestClient(app, headers={"Origin": "http://localhost:3000"})
     created = client.post("/api/conversations", json={"title": "项目讨论"})
     assert created.status_code == 201
     conversation_id = created.json()["id"]
@@ -209,7 +218,7 @@ def test_cors_allows_vite_fallback_development_port():
 def test_agent_chat_endpoint_keeps_conversation_memory():
     """独立 Agent 接口应复用原有持久化链路，而不是产生临时回答。"""
     with patch("app.memory.service.run_agent", return_value=_agent_result("完成")):
-        response = TestClient(app).post(
+        response = TestClient(app, headers={"Origin": "http://localhost:3000"}).post(
             "/api/agent/chat", json={"message": "现在几点？"}
         )
 
@@ -225,7 +234,9 @@ def test_legacy_chat_endpoint_also_uses_agent_tools():
     """旧接口保留兼容性，但同样进入可自主选择工具的 Agent Loop。"""
     agent_result = _agent_result("Agent 回答")
     with patch("app.memory.service.run_agent", return_value=agent_result) as agent:
-        response = TestClient(app).post("/api/chat", json={"message": "你好"})
+        response = TestClient(app, headers={"Origin": "http://localhost:3000"}).post(
+            "/api/chat", json={"message": "你好"}
+        )
 
     assert response.status_code == 200
     assert response.json()["answer"] == "Agent 回答"
@@ -238,7 +249,7 @@ def test_failed_agent_turn_rolls_back_user_message():
         "app.memory.service.run_agent",
         side_effect=RuntimeError("provider unavailable"),
     ):
-        response = TestClient(app).post(
+        response = TestClient(app, headers={"Origin": "http://localhost:3000"}).post(
             "/api/agent/chat",
             json={"message": "不会残留", "conversation_id": conversation_id},
         )
@@ -255,7 +266,7 @@ def test_model_provider_failure_returns_safe_actionable_error():
             "模型服务暂时不可用，请检查 API Key、模型额度或稍后重试"
         ),
     ):
-        response = TestClient(app).post(
+        response = TestClient(app, headers={"Origin": "http://localhost:3000"}).post(
             "/api/agent/chat", json={"message": "日期"}
         )
 

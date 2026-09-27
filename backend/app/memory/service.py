@@ -12,7 +12,7 @@ from app.observability.trace import RequestTrace
 
 
 HISTORY_WINDOW = 20
-# 兼容管理员现有调用；公开访客 API 接入后会在每次服务调用显式传入 owner_id。
+# 旧会话以 admin 作为所有者保留；所有新服务调用都必须显式指定 owner_id。
 ADMIN_OWNER_ID = "admin"
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class ConversationService:
     def list_conversations(
         self,
         *,
-        owner_id: str = ADMIN_OWNER_ID,
+        owner_id: str,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, str | int]]:
@@ -56,26 +56,26 @@ class ConversationService:
         )
 
     def create_conversation(
-        self, title: str = "新会话", *, owner_id: str = ADMIN_OWNER_ID
+        self, title: str = "新会话", *, owner_id: str
     ) -> dict[str, str]:
         conversation_id = repository.create_conversation(title, owner_id=owner_id)
         return {"id": conversation_id, "title": title}
 
     def rename_conversation(
-        self, conversation_id: str, title: str, *, owner_id: str = ADMIN_OWNER_ID
+        self, conversation_id: str, title: str, *, owner_id: str
     ) -> dict[str, str]:
         if not repository.rename_conversation(conversation_id, title, owner_id=owner_id):
             raise ConversationNotFoundError("会话不存在")
         return {"id": conversation_id, "title": title}
 
     def delete_conversation(
-        self, conversation_id: str, *, owner_id: str = ADMIN_OWNER_ID
+        self, conversation_id: str, *, owner_id: str
     ) -> None:
         if not repository.delete_conversation(conversation_id, owner_id=owner_id):
             raise ConversationNotFoundError("会话不存在")
 
     def resolve_conversation(
-        self, conversation_id: str | None, *, owner_id: str = ADMIN_OWNER_ID
+        self, conversation_id: str | None, *, owner_id: str
     ) -> str:
         if conversation_id is None:
             return repository.create_conversation(owner_id=owner_id)
@@ -89,7 +89,7 @@ class ConversationService:
         message: str,
         knowledge_base_id: str | None,
         conversation_id: str | None,
-        owner_id: str = ADMIN_OWNER_ID,
+        owner_id: str,
     ) -> ConversationTurnResult:
         # 同一 Conversation（会话）可有多次请求，每次必须有独立 request_id。
         request_id = uuid4().hex
@@ -170,7 +170,7 @@ class ConversationService:
             )
 
     def get_history(
-        self, conversation_id: str, *, owner_id: str = ADMIN_OWNER_ID
+        self, conversation_id: str, *, owner_id: str
     ) -> list[dict[str, str]]:
         if not repository.conversation_exists(conversation_id, owner_id=owner_id):
             raise ConversationNotFoundError("会话不存在")
@@ -182,7 +182,7 @@ class ConversationService:
         *,
         limit: int = 100,
         offset: int = 0,
-        owner_id: str = ADMIN_OWNER_ID,
+        owner_id: str,
     ) -> list[dict]:
         if not repository.conversation_exists(conversation_id, owner_id=owner_id):
             raise ConversationNotFoundError("会话不存在")

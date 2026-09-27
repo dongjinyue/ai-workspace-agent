@@ -10,21 +10,124 @@ from starlette.responses import Response
 from app import main
 from app.auth import AuthenticationError
 from app.main import app
+from app.memory import repository
 from app.security import InMemoryRateLimiter
 
 
-def test_optional_access_token_protects_private_api():
-    with patch.dict("os.environ", {"APP_ACCESS_TOKEN": "strong-test-token"}):
-        denied = TestClient(app).get("/api/conversations")
-        allowed = TestClient(app).get(
-            "/api/conversations",
-            headers={"Authorization": "Bearer strong-test-token"},
-        )
-        health = TestClient(app).get("/api/health")
+def test_public_session_is_guest_and_legacy_access_token_is_not_required(monkeypatch):
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    monkeypatch.setenv("APP_ACCESS_TOKEN", "legacy-token")
 
-    assert denied.status_code == 401
-    assert allowed.status_code == 200
+    with TestClient(app) as client:
+        session = client.get("/api/session")
+        conversations = client.get("/api/conversations")
+        health = client.get("/api/health")
+
+    assert session.status_code == 200
+    assert session.json()["role"] == "guest"
+    assert session.json()["quota"]["limit"] == 10
+    assert "agent_guest" in session.headers["set-cookie"]
+    assert conversations.status_code == 200
     assert health.status_code == 200
+
+
+def test_guest_conversations_are_isolated_and_request_cannot_claim_admin(monkeypatch):
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    headers = {"Origin": "http://localhost:3000"}
+
+    with TestClient(app) as guest_a, TestClient(app) as guest_b:
+        created = guest_a.post(
+            "/api/conversations",
+            json={"title": "访客 A", "role": "admin", "owner_id": "admin"},
+            headers=headers,
+        )
+        assert created.status_code == 201
+
+        hidden = guest_b.get(
+            f"/api/conversations/{created.json()['id']}/messages"
+        )
+        assert hidden.status_code == 404
+        assert guest_a.get("/api/conversations").json()["conversations"][0]["title"] == "访客 A"
+        assert guest_b.get("/api/conversations").json()["conversations"] == []
+
+
+def test_guest_cannot_upload_or_delete_knowledge_resources(monkeypatch):
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents/upload",
+            files={"file": ("note.txt", b"hello", "text/plain")},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        delete = client.delete(
+            "/api/knowledge-bases/not-public", headers={"Origin": "http://localhost:3000"}
+        )
+
+    assert upload.status_code == 403
+    assert delete.status_code == 403
+
+
+def test_invalid_bearer_does_not_fall_back_to_guest(monkeypatch):
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    with patch(
+        "app.auth.verify_supabase_access_token",
+        AsyncMock(side_effect=AuthenticationError()),
+    ):
+        response = TestClient(app).get(
+            "/api/session", headers={"Authorization": "Bearer expired-or-fake"}
+        )
+
+    assert response.status_code == 401
+    assert "agent_guest" not in response.headers.get("set-cookie", "")
+
+
+def test_only_verified_admin_identity_can_read_legacy_admin_conversations(monkeypatch):
+    monkeypatch.setenv("ADMIN_USER_ID", "verified-admin-uuid")
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    title = "legacy-admin-regression"
+    conversation_id = repository.create_conversation(title, owner_id="admin")
+
+    with patch(
+        "app.auth.verify_supabase_access_token",
+        AsyncMock(return_value="verified-admin-uuid"),
+    ), TestClient(app) as client:
+        admin = client.get(
+            "/api/conversations",
+            headers={"Authorization": "Bearer verified-valid-token"},
+        )
+    assert admin.status_code == 200
+    assert any(
+        item["id"] == conversation_id
+        for item in admin.json()["conversations"]
+    )
+
+    with patch(
+        "app.auth.verify_supabase_access_token",
+        AsyncMock(return_value="some-other-valid-user"),
+    ), TestClient(app) as client:
+        guest = client.get(
+            "/api/conversations",
+            headers={"Authorization": "Bearer verified-valid-token"},
+        )
+    assert guest.status_code == 200
+    assert all(
+        item["id"] != conversation_id
+        for item in guest.json()["conversations"]
+    )
+
+
+def test_browser_write_requires_an_allowed_origin(monkeypatch):
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    with TestClient(app) as client:
+        rejected = client.post("/api/conversations", json={"title": "无来源"})
+        accepted = client.post(
+            "/api/conversations",
+            json={"title": "本地来源"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+
+    assert rejected.status_code == 403
+    assert accepted.status_code == 201
 
 
 def test_rate_limiter_rejects_requests_over_limit():

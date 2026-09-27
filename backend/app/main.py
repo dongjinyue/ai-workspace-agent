@@ -1,6 +1,8 @@
 import os
+import re
 from pathlib import Path
 from uuid import uuid4
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -8,7 +10,17 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BACKEND_DIR / ".env")
 
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -39,8 +51,6 @@ from app.rag.vector_store import (
 from app.security import (
     InMemoryRateLimiter,
     PromptInjectionError,
-    access_token_required,
-    verify_bearer_token,
 )
 
 configure_logging()
@@ -68,6 +78,21 @@ async def get_current_principal(request: Request, response: Response) -> Princip
             detail=error.detail,
         ) from error
 
+
+def require_admin(principal: Principal) -> None:
+    """所有者身份只由已验证的 Principal 决定，绝不接受请求参数覆盖。"""
+    if principal.role != "admin":
+        raise HTTPException(status_code=403, detail="此操作仅限管理员")
+
+
+def _allowed_origin(origin: str) -> bool:
+    if origin in configured_origins:
+        return True
+    if configured_origins:
+        return False
+    # 没有正式配置时仅放行本机开发页面，不能允许任意网页向本机服务写入。
+    return bool(re.fullmatch(r"http://(localhost|127\.0\.0\.1):\d{1,5}", origin))
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configured_origins,
@@ -77,7 +102,7 @@ app.add_middleware(
         if configured_origins
         else r"^http://(localhost|127\.0\.0\.1):\d{1,5}$"
     ),
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
@@ -85,13 +110,15 @@ app.add_middleware(
 
 @app.middleware("http")
 async def protect_api(request: Request, call_next):
-    """为成本敏感接口提供可选访问令牌和单实例限流。"""
+    """保留基础限流，并阻止跨站网页伪造写请求（CSRF）。"""
     if request.url.path.startswith("/api/") and request.url.path != "/api/health":
-        if not verify_bearer_token(request.headers.get("authorization")):
-            return JSONResponse(status_code=401, content={"detail": "访问令牌无效"})
         client_host = request.client.host if request.client else "unknown"
         if not rate_limiter.allow(client_host):
             return JSONResponse(status_code=429, content={"detail": "请求过于频繁"})
+        if request.method in {"POST", "PATCH", "DELETE"}:
+            origin = request.headers.get("origin")
+            if not origin or not _allowed_origin(origin):
+                return JSONResponse(status_code=403, content={"detail": "请求来源不受允许"})
     return await call_next(request)
 
 
@@ -143,7 +170,10 @@ def find_relevant_chunks(knowledge_base_id: str | None, query: str):
 
 
 @app.post("/api/documents/search")
-def search_document(request: SearchRequest):
+def search_document(
+    request: SearchRequest,
+    principal: Principal = Depends(get_current_principal),
+):
     matches = find_relevant_chunks(request.knowledge_base_id, request.query)
 
     return {
@@ -164,17 +194,33 @@ def health_check():
     return {
         "status": "ok",
         "message": "Hello from AI Agent Backend",
-        "auth_required": access_token_required(),
     }
 
 
+@app.get("/api/session")
+def get_session(principal: Principal = Depends(get_current_principal)):
+    """返回服务端识别的身份；后续额度由持久化配额服务填充。"""
+    quota = None
+    if principal.role == "guest":
+        # 中国大陆全年固定 UTC+8，不依赖 Windows/Linux 的 tzdata 安装包。
+        shanghai = timezone(timedelta(hours=8), name="Asia/Shanghai")
+        reset_at = datetime.now(shanghai).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) + timedelta(days=1)
+        quota = {"remaining": 10, "limit": 10, "reset_at": reset_at.isoformat()}
+    return {"role": principal.role, "quota": quota}
+
+
 @app.post("/api/chat")
-def chat(request: ChatRequest):
+def chat(
+    request: ChatRequest,
+    principal: Principal = Depends(get_current_principal),
+):
     """兼容旧客户端；所有聊天请求统一进入 Agent 执行链。"""
-    return _chat(request)
+    return _chat(request, principal)
 
 
-def _chat(request: ChatRequest):
+def _chat(request: ChatRequest, principal: Principal):
     message = request.message.strip()
 
     if not message:
@@ -185,6 +231,7 @@ def _chat(request: ChatRequest):
             message=message,
             knowledge_base_id=request.knowledge_base_id,
             conversation_id=request.conversation_id,
+            owner_id=principal.owner_id,
         )
         result = turn.agent
         return {
@@ -217,9 +264,12 @@ def _chat(request: ChatRequest):
 
 
 @app.post("/api/agent/chat")
-def agent_chat(request: ChatRequest):
+def agent_chat(
+    request: ChatRequest,
+    principal: Principal = Depends(get_current_principal),
+):
     """Agent 模式允许模型自主选择经过注册和校验的工具。"""
-    return _chat(request)
+    return _chat(request, principal)
 
 
 @app.get("/api/conversations/{conversation_id}/messages")
@@ -227,6 +277,7 @@ def get_conversation_messages(
     conversation_id: str,
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(get_current_principal),
 ):
     if len(conversation_id) != 32 or any(
         character not in "0123456789abcdef" for character in conversation_id
@@ -237,6 +288,7 @@ def get_conversation_messages(
             conversation_id,
             limit=limit,
             offset=offset,
+            owner_id=principal.owner_id,
         )
     except ConversationNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
@@ -258,40 +310,54 @@ def get_conversation_messages(
 def list_conversations(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(get_current_principal),
 ):
     return {
         "conversations": conversation_service.list_conversations(
             limit=limit,
             offset=offset,
+            owner_id=principal.owner_id,
         )
     }
 
 
 @app.post("/api/conversations", status_code=201)
-def create_conversation(request: ConversationCreateRequest):
+def create_conversation(
+    request: ConversationCreateRequest,
+    principal: Principal = Depends(get_current_principal),
+):
     title = request.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="会话标题不能为空")
-    return conversation_service.create_conversation(title)
+    return conversation_service.create_conversation(title, owner_id=principal.owner_id)
 
 
 @app.patch("/api/conversations/{conversation_id}")
-def rename_conversation(conversation_id: str, request: ConversationUpdateRequest):
+def rename_conversation(
+    conversation_id: str,
+    request: ConversationUpdateRequest,
+    principal: Principal = Depends(get_current_principal),
+):
     title = request.title.strip()
     if not title:
         raise HTTPException(status_code=400, detail="会话标题不能为空")
     try:
         return conversation_service.rename_conversation(
-            conversation_id, title
+            conversation_id, title, owner_id=principal.owner_id
         )
     except ConversationNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.delete("/api/conversations/{conversation_id}", status_code=204)
-def delete_conversation(conversation_id: str):
+def delete_conversation(
+    conversation_id: str,
+    principal: Principal = Depends(get_current_principal),
+):
     try:
-        conversation_service.delete_conversation(conversation_id)
+        conversation_service.delete_conversation(
+            conversation_id, owner_id=principal.owner_id
+        )
     except ConversationNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
@@ -301,8 +367,10 @@ async def upload_document(
     files: list[UploadFile] = File(default=[]),
     file: UploadFile | None = File(default=None),
     knowledge_base_id: str | None = Form(default=None),
+    principal: Principal = Depends(get_current_principal),
 ):
     """把一次选择的多份文档索引到同一个知识库，并兼容旧版单文件字段。"""
+    require_admin(principal)
     uploaded_files = [*files, *([file] if file is not None else [])]
     if not uploaded_files:
         raise HTTPException(status_code=400, detail="请选择至少一个文档")
@@ -402,6 +470,7 @@ async def upload_document(
 def list_knowledge_bases(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(get_current_principal),
 ):
     return {
         "knowledge_bases": list_knowledge_base_metadata(
@@ -412,7 +481,11 @@ def list_knowledge_bases(
 
 
 @app.delete("/api/knowledge-bases/{knowledge_base_id}", status_code=204)
-def delete_knowledge_base(knowledge_base_id: str):
+def delete_knowledge_base(
+    knowledge_base_id: str,
+    principal: Principal = Depends(get_current_principal),
+):
+    require_admin(principal)
     if not knowledge_base_exists(knowledge_base_id):
         raise HTTPException(status_code=404, detail="知识库不存在")
     delete_collection(knowledge_base_id)
@@ -420,8 +493,13 @@ def delete_knowledge_base(knowledge_base_id: str):
 
 
 @app.delete("/api/knowledge-bases/{knowledge_base_id}/documents/{document_id}")
-def delete_knowledge_document(knowledge_base_id: str, document_id: int):
+def delete_knowledge_document(
+    knowledge_base_id: str,
+    document_id: int,
+    principal: Principal = Depends(get_current_principal),
+):
     """只删除选中的文档及其向量，不影响同一知识库中的其他文档。"""
+    require_admin(principal)
     document = get_knowledge_document(knowledge_base_id, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="文档不存在")

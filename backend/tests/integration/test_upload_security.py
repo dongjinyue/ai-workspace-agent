@@ -5,13 +5,25 @@ import pytest
 from docx import Document
 from fastapi.testclient import TestClient
 
+from app.auth import Principal
 from app.main import app
+from app.main import get_current_principal
 
 
 pytestmark = pytest.mark.integration
 
 
-client = TestClient(app)
+client = TestClient(app, headers={"Origin": "http://localhost:3000"})
+
+
+@pytest.fixture(autouse=True)
+def act_as_verified_admin():
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_current_principal] = lambda: Principal(
+        role="admin", owner_id="admin"
+    )
+    yield
+    app.dependency_overrides.clear()
 
 
 def test_upload_rejects_prompt_injection_with_client_error():

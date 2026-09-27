@@ -3,11 +3,23 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.auth import Principal
 from app.agent.service import AgentResult
 from app.main import app
+from app.main import get_current_principal
 
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def act_as_verified_admin():
+    app.dependency_overrides.clear()
+    app.dependency_overrides[get_current_principal] = lambda: Principal(
+        role="admin", owner_id="admin"
+    )
+    yield
+    app.dependency_overrides.clear()
 
 
 def test_chat_returns_safe_structured_trace():
@@ -27,7 +39,9 @@ def test_chat_returns_safe_structured_trace():
         tool_source="local",
     )
     with patch("app.memory.service.run_agent", return_value=result):
-        response = TestClient(app).post(
+        response = TestClient(
+            app, headers={"Origin": "http://localhost:3000"}
+        ).post(
             "/api/agent/chat", json={"message": "137 乘 29 是多少？"}
         )
 
