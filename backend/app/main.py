@@ -8,13 +8,14 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BACKEND_DIR / ".env")
 
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from app.memory.database import init_database
+from app.auth import AuthenticationError, Principal, resolve_principal
 from app.agent.llm import ModelServiceUnavailableError
 from app.memory.service import ConversationNotFoundError, ConversationService
 from app.observability import configure_logging
@@ -55,6 +56,17 @@ configured_origins = [
     for origin in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+
+
+async def get_current_principal(request: Request, response: Response) -> Principal:
+    """供 API 路由复用统一身份解析，并将认证异常转换为安全 HTTP 响应。"""
+    try:
+        return await resolve_principal(request, response)
+    except AuthenticationError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.detail,
+        ) from error
 
 app.add_middleware(
     CORSMiddleware,
