@@ -94,7 +94,7 @@ Copy-Item backend/.env.example backend/.env
 
 编辑 `backend/.env`，至少填写 `DASHSCOPE_API_KEY`、Supabase 项目公开 URL/Publishable Key 和唯一管理员用户 UUID。公开部署还需要分别生成两个不同的随机 HMAC 密钥，并填写可信 Nginx 地址与允许的 HTTPS 来源。`backend/.env.example` 已列出变量；真实 `.env` 只放服务器，不提交 Git。
 
-使用 Docker Compose 构建前端时，还需在项目根目录 `.env` 中设置 `VITE_SUPABASE_URL` 与 `VITE_SUPABASE_PUBLISHABLE_KEY`，供管理员登录初始化。它们必须是 Supabase 的公开 URL 和 Publishable Key；不要把 `secret` 或 `service_role` 密钥传给前端。可参考根目录 `.env.example`。
+使用 Docker Compose 构建前端时，还需在项目根目录 `.env` 中设置 `VITE_SUPABASE_URL` 与 `VITE_SUPABASE_PUBLISHABLE_KEY`，供管理员登录初始化。它们必须是 Supabase 的公开 URL 和 Publishable Key；不要把 `secret` 或 `service_role` 密钥传给前端。可参考根目录 `.env.example`。若服务器连接官方 Python 包索引不稳定，可在该文件中把 `PIP_INDEX_URL` 改为可信的镜像地址，用于构建后端依赖。
 
 不要把 `.env`、密钥、SQLite 文件或 Chroma 数据提交到 Git。
 
