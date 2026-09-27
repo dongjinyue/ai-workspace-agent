@@ -97,6 +97,13 @@ def agent_node(state: AgentState) -> dict[str, Any]:
     skill = None
     system_prompt = SYSTEM_PROMPT
     available_tools = get_agent_tool_schemas()
+    request_tool_allowlist = state.get("allowed_tools")
+    if request_tool_allowlist is not None:
+        available_tools = [
+            schema
+            for schema in available_tools
+            if schema["function"]["name"] in request_tool_allowlist
+        ]
     if state["active_skill"]:
         skill = get_skill(state["active_skill"])
         if skill is None:
@@ -163,12 +170,17 @@ def tool_node(state: AgentState) -> dict[str, Any]:
 
     tool_call = tool_calls[0]
     tool_name = tool_call.function.name
-    allowed_tools = None
+    allowed_tools = state.get("allowed_tools")
     if state["active_skill"]:
         skill = get_skill(state["active_skill"])
         if skill is None:
             raise ValueError(f"未注册的技能：{state['active_skill']}")
-        allowed_tools = skill.allowed_tools
+        skill_tools = frozenset(skill.allowed_tools)
+        allowed_tools = (
+            skill_tools
+            if allowed_tools is None
+            else allowed_tools.intersection(skill_tools)
+        )
     # Tool（工具）单独计时，便于区分模型慢、检索慢或 MCP 慢。
     tool_started = perf_counter()
     try:

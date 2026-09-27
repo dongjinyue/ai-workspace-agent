@@ -90,6 +90,7 @@ class ConversationService:
         knowledge_base_id: str | None,
         conversation_id: str | None,
         owner_id: str,
+        allowed_tools: frozenset[str] | None = None,
     ) -> ConversationTurnResult:
         # 同一 Conversation（会话）可有多次请求，每次必须有独立 request_id。
         request_id = uuid4().hex
@@ -120,6 +121,7 @@ class ConversationService:
                     knowledge_base_id=knowledge_base_id,
                     conversation_id=resolved_id,
                     history_messages=public_history,
+                    allowed_tools=allowed_tools,
                 )
             except Exception as error:
                 # 未完成轮次不应污染后续上下文；只回滚本次用户消息。

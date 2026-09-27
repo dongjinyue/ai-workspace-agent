@@ -1,6 +1,20 @@
+import os
+import re
 from datetime import datetime, timezone
 
 from app.memory.database import get_connection, init_database
+
+
+_KNOWLEDGE_BASE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def get_public_knowledge_base_ids() -> frozenset[str]:
+    """解析公开知识库名单；任一格式错误都会关闭整份名单，默认不公开。"""
+    configured = os.getenv("PUBLIC_KNOWLEDGE_BASE_IDS", "")
+    ids = [item.strip() for item in configured.split(",") if item.strip()]
+    if not ids or any(not _KNOWLEDGE_BASE_ID.fullmatch(item) for item in ids):
+        return frozenset()
+    return frozenset(ids)
 
 
 def register_knowledge_base(
@@ -82,6 +96,48 @@ def list_knowledge_bases(*, limit: int = 50, offset: int = 0) -> list[dict]:
     return knowledge_bases
 
 
+def list_public_knowledge_bases(
+    public_ids: frozenset[str], *, limit: int = 50, offset: int = 0
+) -> list[dict]:
+    """只查询并返回明确列入访客公开名单的知识库及其目录元数据。"""
+    valid_ids = sorted(
+        item for item in public_ids if _KNOWLEDGE_BASE_ID.fullmatch(item)
+    )
+    if not valid_ids:
+        return []
+    placeholders = ",".join("?" for _ in valid_ids)
+    init_database()
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT id, filename, chunk_count, created_at
+            FROM knowledge_bases
+            WHERE id IN ({placeholders})
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*valid_ids, limit, offset),
+        ).fetchall()
+        knowledge_bases = [dict(row) for row in rows]
+        for item in knowledge_bases:
+            documents = connection.execute(
+                "SELECT id, filename, chunk_count FROM knowledge_documents "
+                "WHERE knowledge_base_id = ? ORDER BY id",
+                (item["id"],),
+            ).fetchall()
+            item["documents"] = (
+                [dict(document) for document in documents]
+                if documents
+                else [
+                    {
+                        "filename": item["filename"],
+                        "chunk_count": item["chunk_count"],
+                    }
+                ]
+            )
+    return knowledge_bases
+
+
 def get_knowledge_base(knowledge_base_id: str) -> dict | None:
     """读取一个知识库及其文档列表。"""
     init_database()
@@ -112,6 +168,18 @@ def get_knowledge_base(knowledge_base_id: str) -> dict | None:
         else [{"filename": item["filename"], "chunk_count": item["chunk_count"]}]
     )
     return item
+
+
+def get_public_knowledge_base(
+    knowledge_base_id: str, public_ids: frozenset[str]
+) -> dict | None:
+    """在读取元数据之前先校验公开名单，避免枚举私有知识库是否存在。"""
+    if (
+        not _KNOWLEDGE_BASE_ID.fullmatch(knowledge_base_id)
+        or knowledge_base_id not in public_ids
+    ):
+        return None
+    return get_knowledge_base(knowledge_base_id)
 
 
 def get_knowledge_document(

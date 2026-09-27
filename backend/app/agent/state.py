@@ -1,4 +1,4 @@
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 
 class AgentState(TypedDict):
@@ -16,3 +16,4 @@ class AgentState(TypedDict):
     tool_traces: list[dict[str, Any]]
     llm_calls: int
     llm_duration_ms: float
+    allowed_tools: NotRequired[frozenset[str] | None]

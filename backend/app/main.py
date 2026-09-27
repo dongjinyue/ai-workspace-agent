@@ -26,9 +26,10 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
-from app.memory.database import init_database
 from app.auth import AuthenticationError, Principal, resolve_principal
+from app.agent.service import GUEST_ALLOWED_TOOLS
 from app.agent.llm import ModelServiceUnavailableError
+from app.memory.database import init_database
 from app.memory.service import ConversationNotFoundError, ConversationService
 from app.observability import configure_logging
 from app.quotas import (
@@ -45,8 +46,11 @@ from app.rag.catalog import (
     delete_knowledge_base as delete_knowledge_base_metadata,
     get_knowledge_base,
     get_knowledge_document,
+    get_public_knowledge_base,
+    get_public_knowledge_base_ids,
     knowledge_base_exists,
     list_knowledge_bases as list_knowledge_base_metadata,
+    list_public_knowledge_bases,
     register_knowledge_base,
 )
 from app.rag.vector_store import (
@@ -180,6 +184,13 @@ def search_document(
     request: SearchRequest,
     principal: Principal = Depends(get_current_principal),
 ):
+    if principal.role == "guest" and request.knowledge_base_id:
+        public_knowledge_base = get_public_knowledge_base(
+            request.knowledge_base_id,
+            get_public_knowledge_base_ids(),
+        )
+        if public_knowledge_base is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
     matches = find_relevant_chunks(request.knowledge_base_id, request.query)
 
     return {
@@ -237,6 +248,14 @@ def _chat(request: ChatRequest, principal: Principal, http_request: Request):
     if not message:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
+    if principal.role == "guest" and request.knowledge_base_id:
+        public_knowledge_base = get_public_knowledge_base(
+            request.knowledge_base_id,
+            get_public_knowledge_base_ids(),
+        )
+        if public_knowledge_base is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+
     if principal.role == "guest":
         if not principal.guest_session_hash:
             raise HTTPException(status_code=503, detail="访客额度服务暂时不可用")
@@ -271,6 +290,9 @@ def _chat(request: ChatRequest, principal: Principal, http_request: Request):
             knowledge_base_id=request.knowledge_base_id,
             conversation_id=request.conversation_id,
             owner_id=principal.owner_id,
+            allowed_tools=(
+                GUEST_ALLOWED_TOOLS if principal.role == "guest" else None
+            ),
         )
         result = turn.agent
         return {
@@ -512,6 +534,12 @@ def list_knowledge_bases(
     offset: int = Query(default=0, ge=0),
     principal: Principal = Depends(get_current_principal),
 ):
+    if principal.role == "guest":
+        return {
+            "knowledge_bases": list_public_knowledge_bases(
+                get_public_knowledge_base_ids(), limit=limit, offset=offset
+            )
+        }
     return {
         "knowledge_bases": list_knowledge_base_metadata(
             limit=limit,

@@ -17,6 +17,7 @@ from app.main import ChatRequest
 from app.memory import repository
 from app.quotas import GuestQuotaExceeded
 from app.security import InMemoryRateLimiter
+from app.rag.catalog import register_knowledge_base
 
 
 def test_public_session_is_guest_and_legacy_access_token_is_not_required(monkeypatch):
@@ -213,6 +214,74 @@ def test_accepted_guest_request_consumes_quota_even_if_model_fails(tmp_path, mon
 
     assert failed.status_code == 502
     assert refreshed.json()["quota"]["remaining"] == 9
+
+
+def test_guest_knowledge_listing_is_empty_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "knowledge.db"))
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    monkeypatch.delenv("PUBLIC_KNOWLEDGE_BASE_IDS", raising=False)
+    register_knowledge_base(
+        "private-base", [{"filename": "private.txt", "chunk_count": 1}]
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/knowledge-bases")
+
+    assert response.status_code == 200
+    assert response.json()["knowledge_bases"] == []
+
+
+def test_guest_can_only_search_explicitly_public_knowledge_bases(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "allowlist.db"))
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    monkeypatch.setenv("PUBLIC_KNOWLEDGE_BASE_IDS", "public-base")
+    register_knowledge_base(
+        "public-base", [{"filename": "public.txt", "chunk_count": 1}]
+    )
+    register_knowledge_base(
+        "private-base", [{"filename": "private.txt", "chunk_count": 1}]
+    )
+
+    with (
+        TestClient(app) as client,
+        patch.object(main, "find_relevant_chunks", return_value=[]) as search,
+    ):
+        listed = client.get("/api/knowledge-bases")
+        private = client.post(
+            "/api/documents/search",
+            json={"knowledge_base_id": "private-base", "query": "private"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+        assert private.status_code == 404
+        search.assert_not_called()
+
+        public = client.post(
+            "/api/documents/search",
+            json={"knowledge_base_id": "public-base", "query": "public"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+
+    assert [item["id"] for item in listed.json()["knowledge_bases"]] == [
+        "public-base"
+    ]
+    assert public.status_code == 200
+    search.assert_called_once_with("public-base", "public")
+
+
+def test_guest_cannot_select_private_knowledge_base_for_chat(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "chat-private-kb.db"))
+    monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
+    monkeypatch.setenv("PUBLIC_KNOWLEDGE_BASE_IDS", "public-base")
+    register_knowledge_base(
+        "private-base", [{"filename": "private.txt", "chunk_count": 1}]
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/agent/chat",
+            json={"message": "查一下", "knowledge_base_id": "private-base"},
+            headers={"Origin": "http://localhost:3000"},
+        )
+
+    assert response.status_code == 404
 
 
 def test_rate_limiter_rejects_requests_over_limit():

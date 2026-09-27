@@ -15,6 +15,17 @@ from app.security import PROMPT_INJECTION_MARKERS
 from app.agent.llm import create_llm_client, model_name
 
 
+# 访客只获得无副作用的计算、公开检索和已验证的只读 MCP 工具。
+GUEST_ALLOWED_TOOLS = frozenset(
+    {
+        "calculator",
+        "search_knowledge_base",
+        "get_current_time",
+        "calculate_text_stats",
+    }
+)
+
+
 @dataclass(frozen=True)
 class AgentResult:
     answer: str
@@ -37,7 +48,7 @@ def execute_tool(
     raw_arguments: str,
     knowledge_base_id: str | None,
     *,
-    allowed_tools: tuple[str, ...] | None = None,
+    allowed_tools: frozenset[str] | tuple[str, ...] | None = None,
 ) -> dict:
     """执行白名单中的工具，并严格校验模型提供的参数。"""
     registration = TOOLS.get(tool_name)
@@ -146,6 +157,7 @@ def run_agent(
     *,
     conversation_id: str | None = None,
     history_messages: list[dict[str, str]] | None = None,
+    allowed_tools: frozenset[str] | None = None,
 ) -> AgentResult:
     """从 START 开始调用已编译的 LangGraph 工作流。"""
     from app.agent.graph import agent_graph
@@ -169,6 +181,7 @@ def run_agent(
             "tool_traces": [],
             "llm_calls": 0,
             "llm_duration_ms": 0.0,
+            "allowed_tools": allowed_tools,
         }
     )
     answer = result.get("final_answer") or _message_content(result["messages"][-1])
