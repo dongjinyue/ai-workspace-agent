@@ -171,7 +171,7 @@ def test_one_document_can_be_deleted_without_removing_others():
     assert [item["filename"] for item in deleted.json()["documents"]] == [
         "keep.txt"
     ]
-    assert deleted.json()["chunk_count"] == 2
+    assert deleted.json()["chunks"] == 2
     delete_vectors.assert_called_once()
     assert delete_vectors.call_args.args[0] == knowledge_base_id
     assert isinstance(delete_vectors.call_args.args[1], str)
