@@ -371,12 +371,13 @@ function App() {
     try {
       const form = new FormData();
       selectedFiles.forEach((selectedFile) => form.append("files", selectedFile));
-      if (knowledgeBaseId) form.append("knowledge_base_id", knowledgeBaseId);
+      const selectedKnowledgeBase = knowledgeBases.find((item) => item.id === knowledgeBaseId);
+      if (knowledgeBaseId && (isAdmin || selectedKnowledgeBase?.can_edit)) form.append("knowledge_base_id", knowledgeBaseId);
       const data = await request("/api/documents/upload", { method: "POST", body: form });
       setKnowledgeBaseId(data.knowledge_base_id);
       setKnowledgeDocuments(data.documents || []);
-      await restoreKnowledgeBase("admin");
-      localStorage.setItem("knowledge_base_id", data.knowledge_base_id);
+      localStorage.setItem(isAdmin ? "knowledge_base_id" : "guest_knowledge_base_id", data.knowledge_base_id);
+      await restoreKnowledgeBase(isAdmin ? "admin" : "guest");
     } catch (requestError) { setError(requestError.message); }
     finally { setUploading(false); event.target.value = ""; }
   }
@@ -417,6 +418,8 @@ function App() {
   }
 
   const activeConversation = conversations.find((item) => item.id === conversationId);
+  const selectedKnowledgeBase = knowledgeBases.find((item) => item.id === knowledgeBaseId);
+  const canEditKnowledgeBase = isAdmin || selectedKnowledgeBase?.can_edit === true;
   const exhausted = !isAdmin && session?.quota?.remaining <= 0;
 
   return <main className="app-shell">
@@ -437,21 +440,21 @@ function App() {
         {session && !conversations.length && <p className="empty">还没有会话，点击上方按钮开始吧</p>}
       </div>
       <section className="knowledge" aria-labelledby="knowledge-title">
-        <span id="knowledge-title">{isAdmin ? "我的知识库" : "公开知识库"}<i>{knowledgeBases.length ? `${knowledgeBases.length} 个` : "未开放"}</i></span>
+        <span id="knowledge-title">{isAdmin ? "我的知识库" : "个人与共享库"}<i>{knowledgeBases.length ? `${knowledgeBases.length} 个` : "暂无"}</i></span>
         {knowledgeBases.length > 0 && <label className="knowledge-select-label" htmlFor="knowledge-base-select">选择本次问答使用的知识库</label>}
         {knowledgeBases.length > 0 && <select id="knowledge-base-select" value={knowledgeBaseId} onChange={(event) => {
           const selected = knowledgeBases.find((item) => item.id === event.target.value);
           setKnowledgeBaseId(event.target.value);
           setKnowledgeDocuments(selected?.documents || []);
-          localStorage.setItem(knowledgeStorageKey, event.target.value);
+          if (event.target.value) localStorage.setItem(knowledgeStorageKey, event.target.value);
+          else localStorage.removeItem(knowledgeStorageKey);
         }}>
-          {knowledgeBases.map((item) => <option key={item.id} value={item.id}>{item.title || item.name || item.documents?.[0]?.filename || item.id}</option>)}
+          <option value="">＋ 新建知识库</option>
+          {knowledgeBases.map((item) => <option key={item.id} value={item.id}>{!isAdmin && !item.can_edit ? "共享 · " : ""}{item.title || item.name || item.documents?.[0]?.filename || item.id}</option>)}
         </select>}
-        {isAdmin ? <>
-          {uploading ? <small role="status">正在解析并建立索引…</small> : knowledgeDocuments.length ? <ul className="knowledge-documents">{knowledgeDocuments.map((document, index) => <li key={document.id || `${document.filename}-${index}`} title={document.filename}><span>{document.filename}</span>{document.id && <button type="button" title={`删除 ${document.filename}`} aria-label={`删除 ${document.filename}`} onClick={() => removeKnowledgeDocument(document)}>×</button>}</li>)}</ul> : <small>尚未上传知识文档</small>}
-          <div className="knowledge-actions"><label>{uploading ? "处理中" : knowledgeBaseId ? "继续添加" : "上传文档"}<input type="file" multiple accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={uploadDocument} disabled={uploading} /></label>{knowledgeBaseId && <button onClick={removeKnowledgeBase}>清空</button>}</div>
-          <small className="knowledge-hint">仅管理员可上传或删除知识库内容</small>
-        </> : knowledgeBases.length ? <small>访客仅能检索管理员公开的知识库</small> : <small>当前没有向访客开放知识库</small>}
+        {uploading ? <small role="status">正在解析并建立索引…</small> : knowledgeDocuments.length ? <ul className="knowledge-documents">{knowledgeDocuments.map((document, index) => <li key={document.id || `${document.filename}-${index}`} title={document.filename}><span>{document.filename}</span>{canEditKnowledgeBase && document.id && <button type="button" title={`删除 ${document.filename}`} aria-label={`删除 ${document.filename}`} onClick={() => removeKnowledgeDocument(document)}>×</button>}</li>)}</ul> : <small>{isAdmin ? "尚未上传知识文档" : "上传文件，创建只属于当前访客会话的个人知识库"}</small>}
+        <div className="knowledge-actions"><label>{uploading ? "处理中" : knowledgeBaseId && canEditKnowledgeBase ? "继续添加" : "创建个人库"}<input type="file" multiple accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={uploadDocument} disabled={uploading} /></label>{knowledgeBaseId && canEditKnowledgeBase && <button onClick={removeKnowledgeBase}>{isAdmin ? "清空" : "删除我的库"}</button>}</div>
+        <small className="knowledge-hint">{isAdmin ? "管理员可管理全部知识库；游客只能使用自己的文件" : canEditKnowledgeBase ? "个人库只对当前访客可见；清除此网站 Cookie 或更换浏览器后将无法找回" : "共享库仅可检索；上传会另建私人库"}</small>
       </section>
     </aside>
     <section className="chat-panel">

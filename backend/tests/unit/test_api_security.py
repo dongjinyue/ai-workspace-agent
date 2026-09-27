@@ -23,6 +23,7 @@ from app.rag.catalog import register_knowledge_base
 @pytest.fixture(autouse=True)
 def configure_ip_hash_key_for_tests(monkeypatch):
     monkeypatch.setenv("IP_HASH_HMAC_KEY", "i" * 40)
+    monkeypatch.setattr(main, "guest_upload_rate_limiter", InMemoryRateLimiter(3))
 
 
 def test_public_session_is_guest_and_legacy_access_token_is_not_required(monkeypatch):
@@ -62,20 +63,83 @@ def test_guest_conversations_are_isolated_and_request_cannot_claim_admin(monkeyp
         assert guest_b.get("/api/conversations").json()["conversations"] == []
 
 
-def test_guest_cannot_upload_or_delete_knowledge_resources(monkeypatch):
+def test_guest_can_create_private_knowledge_base_but_cannot_access_anothers(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("APP_DATABASE_PATH", str(tmp_path / "guest-private-kb.db"))
     monkeypatch.setenv("GUEST_SESSION_HMAC_KEY", "g" * 40)
-    with TestClient(app) as client:
-        upload = client.post(
-            "/api/documents/upload",
-            files={"file": ("note.txt", b"hello", "text/plain")},
-            headers={"Origin": "http://localhost:3000"},
+    monkeypatch.delenv("PUBLIC_KNOWLEDGE_BASE_IDS", raising=False)
+    principal = [
+        Principal(
+            role="guest",
+            owner_id="guest:alpha",
+            guest_session_hash="a" * 64,
         )
-        delete = client.delete(
-            "/api/knowledge-bases/not-public", headers={"Origin": "http://localhost:3000"}
-        )
+    ]
+    app.dependency_overrides[main.get_current_principal] = lambda: principal[0]
+    try:
+        with (
+            patch("app.main.index_document", return_value=2),
+            patch.object(main, "find_relevant_chunks", return_value=[]) as search,
+            TestClient(app) as client,
+        ):
+            uploaded = client.post(
+                "/api/documents/upload",
+                files={
+                    "file": (
+                        "private-note.txt",
+                        b"my private notes",
+                        "text/plain",
+                    )
+                },
+                headers={"Origin": "http://localhost:3000"},
+            )
+            knowledge_base_id = uploaded.json()["knowledge_base_id"]
+            own_list = client.get("/api/knowledge-bases")
 
-    assert upload.status_code == 403
-    assert delete.status_code == 403
+            principal[0] = Principal(
+                role="guest", owner_id="guest:beta", guest_session_hash="b" * 64
+            )
+            other_list = client.get("/api/knowledge-bases")
+            hidden_search = client.post(
+                "/api/documents/search",
+                json={
+                    "knowledge_base_id": knowledge_base_id,
+                    "query": "private",
+                },
+                headers={"Origin": "http://localhost:3000"},
+            )
+            with (
+                patch.object(main, "reserve_guest_ai_request") as reserve,
+                patch.object(main.conversation_service, "chat") as chat,
+            ):
+                hidden_chat = client.post(
+                    "/api/agent/chat",
+                    json={
+                        "knowledge_base_id": knowledge_base_id,
+                        "message": "读取别人的个人知识库",
+                    },
+                    headers={"Origin": "http://localhost:3000"},
+                )
+            hidden_delete = client.delete(
+                f"/api/knowledge-bases/{knowledge_base_id}",
+                headers={"Origin": "http://localhost:3000"},
+            )
+    finally:
+        app.dependency_overrides.pop(main.get_current_principal, None)
+
+    assert uploaded.status_code == 200
+    assert [item["id"] for item in own_list.json()["knowledge_bases"]] == [
+        knowledge_base_id
+    ]
+    assert own_list.json()["knowledge_bases"][0]["can_edit"] is True
+    assert other_list.json()["knowledge_bases"] == []
+    assert hidden_search.status_code == 404
+    assert hidden_chat.status_code == 404
+    assert hidden_delete.status_code == 404
+    search.assert_not_called()
+    reserve.assert_not_called()
+    chat.assert_not_called()
 
 
 def test_invalid_bearer_does_not_fall_back_to_guest(monkeypatch):

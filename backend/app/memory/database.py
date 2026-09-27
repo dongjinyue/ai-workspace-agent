@@ -84,6 +84,21 @@ def init_database() -> None:
             )
             """
         )
+        # 原有管理员知识库在升级后仍归管理员所有，既有数据不丢失。
+        knowledge_base_columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(knowledge_bases)"
+            ).fetchall()
+        }
+        if "owner_id" not in knowledge_base_columns:
+            connection.execute(
+                "ALTER TABLE knowledge_bases ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'admin'"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_bases_owner_created "
+            "ON knowledge_bases (owner_id, created_at DESC)"
+        )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS knowledge_documents (
@@ -92,6 +107,7 @@ def init_database() -> None:
                 filename TEXT NOT NULL,
                 chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
                 upload_batch TEXT,
+                size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (knowledge_base_id)
                     REFERENCES knowledge_bases(id) ON DELETE CASCADE
@@ -108,6 +124,10 @@ def init_database() -> None:
         if "upload_batch" not in document_columns:
             connection.execute(
                 "ALTER TABLE knowledge_documents ADD COLUMN upload_batch TEXT"
+            )
+        if "size_bytes" not in document_columns:
+            connection.execute(
+                "ALTER TABLE knowledge_documents ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0"
             )
         connection.execute(
             """

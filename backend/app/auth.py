@@ -14,7 +14,8 @@ from fastapi import Request, Response
 
 ADMIN_OWNER_ID = "admin"
 GUEST_COOKIE_NAME = "agent_guest"
-GUEST_COOKIE_MAX_AGE = 60 * 60 * 24
+# 访客知识库绑定到签名 Cookie；保留 30 天，AI 额度仍按北京时间每日重置。
+GUEST_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 SUPABASE_AUTH_TIMEOUT_SECONDS = 5.0
 _GUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 

@@ -165,9 +165,9 @@ npm run dev
 | GET/POST | `/api/conversations` | 分页查询/创建会话 |
 | PATCH/DELETE | `/api/conversations/{id}` | 重命名/删除会话 |
 | GET | `/api/conversations/{id}/messages` | 分页恢复消息和 Trace |
-| POST | `/api/documents/upload` | 一次上传并索引多个 TXT、MD、DOCX、PDF 文档 |
+| POST | `/api/documents/upload` | 管理员或访客上传并索引多个 TXT、MD、DOCX、PDF 文档；游客内容仅归本人 |
 | POST | `/api/documents/search` | 直接检索知识库 |
-| GET/DELETE | `/api/knowledge-bases` | 查询/删除知识库 |
+| GET/DELETE | `/api/knowledge-bases` | 查询/删除知识库；游客仅能看到和删除自己的个人库及共享库 |
 | DELETE | `/api/knowledge-bases/{id}/documents/{document_id}` | 单独删除文档及其向量 |
 
 浏览器访客请求自动携带 HttpOnly Cookie；管理员请求附带 Supabase access token（访问令牌），后端再通过 Supabase 验证用户并比对唯一管理员 UUID。健康检查不包含密钥或用户资料。
@@ -198,12 +198,13 @@ npm run build
 - 模型密钥、访客 Cookie 签名密钥和 IP 摘要密钥只从后端环境变量读取；两个 HMAC 密钥必须独立。`.env` 被 Git 和 Docker Build Context 排除。
 - 生产模式 `APP_ENV=production` 会在启动时检查 Supabase、管理员 UUID、至少 32 字节的独立密钥、HTTPS 来源、可信代理网段、正整数限额与 Secure Cookie；缺少或不安全时拒绝启动。
 - 访客对话和额度账本以 SQLite 持久化；IP 只保存独立密钥生成的 HMAC 摘要。限额是滥用防护，不是模型费用的绝对上限或身份验证。
-- 默认不向访客公开任何知识库；管理员必须通过 `PUBLIC_KNOWLEDGE_BASE_IDS` 明确列出允许访客检索的知识库 ID。访客不能上传或删除内容，只能使用审核过的只读工具。
+- 游客可上传文件建立个人知识库；目录、检索、追加和删除都按签名访客身份隔离，其他访客无法枚举或访问。访客 IP 每分钟最多上传 3 次，每个访客身份最多创建 5 个个人库、累计 50 份文档和 50 MB 文件内容。
+- 管理员已有知识库默认不对游客公开；如需共享只读内容，可通过 `PUBLIC_KNOWLEDGE_BASE_IDS` 明确列出知识库 ID。访客不能向共享库追加内容。
 - Compose 的前后端端口仅绑定 `127.0.0.1`，应由现有 Nginx 处理 HTTPS 和反向代理；不要为此向公网开放新的应用端口。
 - MCP 子进程使用环境变量允许列表，且不经过 Shell 启动。
 - 本地工具使用 Pydantic，MCP 工具使用 JSON Schema 校验参数。
 - MCP Tool Result 被视为外部不可信数据。
-- 文档上传支持 TXT、Markdown、DOCX、电子 PDF 和扫描版 PDF；扫描页面自动使用离线中文 OCR（单份最多 30 页）。后续上传默认追加到当前知识库，不覆盖已有文档；单文件最大 10 MB、单次最多 10 个且总计不超过 30 MB，并进行基础注入标记检测。
+- 文档上传支持 TXT、Markdown、DOCX、电子 PDF 和扫描版 PDF；扫描页面自动使用离线中文 OCR（单份最多 30 页）。后续上传默认追加到当前可编辑知识库，不覆盖已有文档；单文件最大 10 MB、单次最多 10 个且总计不超过 30 MB，并进行基础注入标记检测。
 - API 返回通用错误，内部异常类型只写服务端日志。
 - 同一会话在单进程内串行执行，失败轮次回滚用户消息。
 - Agent 设有执行步数和每轮工具调用数量上限。

@@ -52,6 +52,8 @@ from app.rag.catalog import (
     get_knowledge_document,
     get_public_knowledge_base,
     get_public_knowledge_base_ids,
+    get_owner_knowledge_base_count,
+    knowledge_base_is_owned_by,
     knowledge_base_exists,
     list_knowledge_bases as list_knowledge_base_metadata,
     list_public_knowledge_bases,
@@ -74,6 +76,8 @@ conversation_service = ConversationService()
 rate_limiter = InMemoryRateLimiter(
     int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "60"))
 )
+# 匿名文件上传不应继承普通查询额度，单独限制每个 IP 每分钟最多 3 次。
+guest_upload_rate_limiter = InMemoryRateLimiter(3)
 
 configured_origins = [
     origin.strip()
@@ -171,6 +175,7 @@ class ConversationUpdateRequest(BaseModel):
 MAX_FILE_SIZE = 10 * 1024 * 1024
 MAX_UPLOAD_SIZE = 30 * 1024 * 1024
 MAX_FILES_PER_UPLOAD = 10
+MAX_GUEST_KNOWLEDGE_BYTES = 50 * 1024 * 1024
 
 
 def find_relevant_chunks(knowledge_base_id: str | None, query: str):
@@ -192,6 +197,7 @@ def search_document(
         public_knowledge_base = get_public_knowledge_base(
             request.knowledge_base_id,
             get_public_knowledge_base_ids(),
+            owner_id=principal.owner_id,
         )
         if public_knowledge_base is None:
             raise HTTPException(status_code=404, detail="知识库不存在")
@@ -256,6 +262,7 @@ def _chat(request: ChatRequest, principal: Principal, http_request: Request):
         public_knowledge_base = get_public_knowledge_base(
             request.knowledge_base_id,
             get_public_knowledge_base_ids(),
+            owner_id=principal.owner_id,
         )
         if public_knowledge_base is None:
             raise HTTPException(status_code=404, detail="知识库不存在")
@@ -430,20 +437,52 @@ def delete_conversation(
 
 @app.post("/api/documents/upload")
 async def upload_document(
+    http_request: Request,
     files: list[UploadFile] = File(default=[]),
     file: UploadFile | None = File(default=None),
     knowledge_base_id: str | None = Form(default=None),
     principal: Principal = Depends(get_current_principal),
 ):
     """把一次选择的多份文档索引到同一个知识库，并兼容旧版单文件字段。"""
-    require_admin(principal)
+    if principal.role == "guest" and not guest_upload_rate_limiter.allow(
+        hash_client_ip(http_request)
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="上传过于频繁，请稍后再试",
+        )
     uploaded_files = [*files, *([file] if file is not None else [])]
     if not uploaded_files:
         raise HTTPException(status_code=400, detail="请选择至少一个文档")
     if len(uploaded_files) > MAX_FILES_PER_UPLOAD:
         raise HTTPException(status_code=400, detail="一次最多上传 10 个文档")
 
-    parsed_documents: list[tuple[str, str]] = []
+    is_new_knowledge_base = knowledge_base_id is None
+    if knowledge_base_id is not None:
+        if not knowledge_base_exists(knowledge_base_id):
+            raise HTTPException(status_code=404, detail="要追加的知识库不存在")
+        if principal.role == "guest" and not knowledge_base_is_owned_by(
+            knowledge_base_id, principal.owner_id
+        ):
+            # 共享知识库也不能追加；游客上传内容只能进入自己的库。
+            raise HTTPException(status_code=404, detail="要追加的知识库不存在")
+    elif principal.role == "guest":
+        base_count, _, _ = get_owner_knowledge_base_count(principal.owner_id)
+        if base_count >= 5:
+            raise HTTPException(
+                status_code=413,
+                detail="访客最多创建 5 个个人知识库，请先删除不再使用的知识库",
+            )
+
+    if principal.role == "guest":
+        _, document_count, _ = get_owner_knowledge_base_count(principal.owner_id)
+        if document_count + len(uploaded_files) > 50:
+            raise HTTPException(
+                status_code=413,
+                detail="访客个人知识库最多保存 50 份文档，请先删除部分文档",
+            )
+
+    uploaded_documents: list[tuple[str, bytes]] = []
     total_size = 0
     for uploaded_file in uploaded_files:
         # Path.name 去掉浏览器可能传入的目录信息，仅保留安全展示名称。
@@ -459,6 +498,19 @@ async def upload_document(
             raise HTTPException(status_code=413, detail="单次上传总大小不能超过 30 MB")
         if not content:
             raise HTTPException(status_code=400, detail=f"{filename or '文档'} 内容为空")
+        uploaded_documents.append((filename, content))
+
+    if principal.role == "guest":
+        _, _, existing_bytes = get_owner_knowledge_base_count(principal.owner_id)
+        if existing_bytes + total_size > MAX_GUEST_KNOWLEDGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="访客个人知识库累计最多 50 MB，请先删除部分文档",
+            )
+
+    # 先检查整批文件的字节数，再做 PDF OCR 或向量化，避免超额文件消耗处理资源。
+    parsed_documents: list[tuple[str, str, int]] = []
+    for filename, content in uploaded_documents:
         try:
             text = await run_in_threadpool(parse_document, filename, content)
         except DocumentParseError as error:
@@ -468,11 +520,8 @@ async def upload_document(
                 status_code=400,
                 detail=f"无法从 {filename} 识别有效文字；请确认扫描清晰、方向正确且页数不超过限制",
             )
-        parsed_documents.append((filename, text))
+        parsed_documents.append((filename, text, len(content)))
 
-    is_new_knowledge_base = knowledge_base_id is None
-    if knowledge_base_id is not None and not knowledge_base_exists(knowledge_base_id):
-        raise HTTPException(status_code=404, detail="要追加的知识库不存在")
     knowledge_base_id = knowledge_base_id or uuid4().hex
     upload_batch = uuid4().hex
     document_metadata: list[dict[str, str | int]] = []
@@ -484,7 +533,7 @@ async def upload_document(
             delete_chunks_by_upload_batch(knowledge_base_id, upload_batch)
 
     try:
-        for filename, text in parsed_documents:
+        for filename, text, size_bytes in parsed_documents:
             chunk_count = await run_in_threadpool(
                 index_document,
                 knowledge_base_id,
@@ -498,6 +547,7 @@ async def upload_document(
                 {
                     "filename": filename,
                     "chunk_count": chunk_count,
+                    "size_bytes": size_bytes,
                     # 保存批次标识，删除同名文档时只删除用户选中的那一次上传。
                     "upload_batch": upload_batch,
                 }
@@ -514,7 +564,11 @@ async def upload_document(
 
     try:
         if is_new_knowledge_base:
-            register_knowledge_base(knowledge_base_id, document_metadata)
+            register_knowledge_base(
+                knowledge_base_id,
+                document_metadata,
+                owner_id=principal.owner_id,
+            )
         else:
             append_knowledge_documents(knowledge_base_id, document_metadata)
     except Exception:
@@ -539,16 +593,26 @@ def list_knowledge_bases(
     principal: Principal = Depends(get_current_principal),
 ):
     if principal.role == "guest":
-        return {
-            "knowledge_bases": list_public_knowledge_bases(
-                get_public_knowledge_base_ids(), limit=limit, offset=offset
-            )
-        }
-    return {
-        "knowledge_bases": list_knowledge_base_metadata(
+        knowledge_bases = list_public_knowledge_bases(
+            get_public_knowledge_base_ids(),
+            owner_id=principal.owner_id,
             limit=limit,
             offset=offset,
         )
+        for knowledge_base in knowledge_bases:
+            knowledge_base["can_edit"] = (
+                knowledge_base["owner_id"] == principal.owner_id
+            )
+            knowledge_base.pop("owner_id", None)
+        return {
+            "knowledge_bases": knowledge_bases
+        }
+    knowledge_bases = list_knowledge_base_metadata(limit=limit, offset=offset)
+    for knowledge_base in knowledge_bases:
+        knowledge_base["can_edit"] = True
+        knowledge_base.pop("owner_id", None)
+    return {
+        "knowledge_bases": knowledge_bases
     }
 
 
@@ -557,8 +621,10 @@ def delete_knowledge_base(
     knowledge_base_id: str,
     principal: Principal = Depends(get_current_principal),
 ):
-    require_admin(principal)
-    if not knowledge_base_exists(knowledge_base_id):
+    if not knowledge_base_exists(knowledge_base_id) or (
+        principal.role == "guest"
+        and not knowledge_base_is_owned_by(knowledge_base_id, principal.owner_id)
+    ):
         raise HTTPException(status_code=404, detail="知识库不存在")
     delete_collection(knowledge_base_id)
     delete_knowledge_base_metadata(knowledge_base_id)
@@ -571,7 +637,10 @@ def delete_knowledge_document(
     principal: Principal = Depends(get_current_principal),
 ):
     """只删除选中的文档及其向量，不影响同一知识库中的其他文档。"""
-    require_admin(principal)
+    if principal.role == "guest" and not knowledge_base_is_owned_by(
+        knowledge_base_id, principal.owner_id
+    ):
+        raise HTTPException(status_code=404, detail="文档不存在")
     document = get_knowledge_document(knowledge_base_id, document_id)
     if document is None:
         raise HTTPException(status_code=404, detail="文档不存在")
@@ -588,4 +657,10 @@ def delete_knowledge_document(
         raise HTTPException(status_code=500, detail="文档向量删除失败") from error
     if not delete_knowledge_document_metadata(knowledge_base_id, document_id):
         raise HTTPException(status_code=404, detail="文档不存在")
-    return get_knowledge_base(knowledge_base_id)
+    knowledge_base = get_knowledge_base(knowledge_base_id)
+    if knowledge_base is None:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+    return {
+        "documents": knowledge_base["documents"],
+        "chunks": knowledge_base["chunk_count"],
+    }
