@@ -1,78 +1,44 @@
-.auth-screen {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: #f7f9fc;
-}
-
-.auth-screen form {
-  width: min(100%, 390px);
-  padding: 36px;
-  border: 1px solid #e2e7ef;
-  border-radius: 20px;
-  background: #fff;
-  box-shadow: 0 18px 50px #26314714;
-  text-align: center;
-}
-
-.auth-mark {
-  width: 52px;
-  height: 52px;
-  display: grid;
-  place-items: center;
-  margin: 0 auto 18px;
-  border-radius: 15px;
-  background: linear-gradient(145deg, #7067f0, #4f46e5);
-  color: #fff;
-  font-weight: 800;
-}
-
-.auth-screen h1 {
-  margin: 0;
-  font-size: 22px;
-}
-
-.auth-screen p {
-  margin: 10px 0 24px;
-  color: #7d8798;
-  font-size: 12px;
-  line-height: 1.7;
-}
-
-.auth-screen input {
-  width: 100%;
-  padding: 12px 14px;
+.admin-dialog {
+  position: fixed;
+  width: min(440px, calc(100vw - 32px));
+  max-width: 100%;
+  max-height: min(90dvh, 720px);
+  padding: 34px;
+  overflow-y: auto;
   border: 1px solid #dce2eb;
-  border-radius: 10px;
-  outline: none;
+  border-radius: 20px;
+  color: #172033;
+  background: #fff;
+  box-shadow: 0 24px 80px #10182a35;
 }
 
-.auth-screen input:focus {
-  border-color: #6866dc;
-}
+.admin-dialog::backdrop { background: #11182780; backdrop-filter: blur(3px); }
+.dialog-close { position: absolute; top: 12px; right: 14px; width: 36px; height: 36px; border: 0; border-radius: 9px; background: transparent; color: #778196; font-size: 24px; }
+.dialog-close:hover { background: #f1f3f7; color: #172033; }
+.auth-mark { width: 48px; height: 48px; display: grid; place-items: center; margin: 0 auto 16px; border-radius: 15px; background: linear-gradient(145deg,#7067f0,#4f46e5); color: #fff; font-size: 14px; font-weight: 800; }
+.dialog-eyebrow { margin: 0 0 7px; color: #6b67dc; text-align: center; font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+.admin-dialog h2 { margin: 0; text-align: center; font-size: 22px; }
+.dialog-intro { margin: 10px 0 22px; color: #7d8798; text-align: center; font-size: 12px; line-height: 1.7; }
+.admin-dialog form { display: grid; gap: 9px; }
+.admin-dialog label { margin-top: 5px; color: #3c465a; font-size: 12px; font-weight: 650; }
+.admin-dialog input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid #dce2eb; border-radius: 9px; outline: none; color: #172033; background: white; }
+.admin-dialog input:focus-visible { border-color: #6866dc; box-shadow: 0 0 0 3px #6866dc24; }
+.dialog-submit { min-height: 44px; margin-top: 10px; border: 0; border-radius: 10px; background: #5b5bd6; color: white; font-weight: 650; }
+.dialog-submit:hover:not(:disabled) { background: #4848c7; }
+.dialog-submit:disabled { background: #cfd4de; cursor: not-allowed; }
+.dialog-error, .config-notice { margin: 5px 0 0; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.55; }
+.dialog-error { color: #9c3333; background: #fff0f0; }
+.config-notice { color: #765520; background: #fff7e6; }
+.dialog-footnote { display: block; margin-top: 17px; color: #8992a2; text-align: center; font-size: 10px; line-height: 1.6; }
+.confirm-dialog { width: min(460px, calc(100vw - 32px)); }
+.confirm-dialog .dialog-eyebrow { margin-top: 10px; }
+.confirm-dialog h2 { font-size: 19px; }
+.confirm-dialog .dialog-intro { margin-bottom: 22px; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.confirm-actions button { min-height: 42px; padding: 0 14px; border: 1px solid #dfe4ec; border-radius: 9px; color: #46516a; background: #fff; font-size: 12px; }
+.confirm-actions .confirm-danger { border-color: #b83c45; color: white; background: #bf414a; }
+.confirm-actions button:disabled { cursor: wait; opacity: .7; }
 
-.auth-screen button {
-  width: 100%;
-  margin-top: 12px;
-  padding: 12px;
-  border: 0;
-  border-radius: 10px;
-  background: #5b5bd6;
-  color: #fff;
-}
-
-.auth-screen button:disabled {
-  background: #cfd4de;
-}
-
-.auth-screen small {
-  display: block;
-  margin-top: 12px;
-  color: #d05252;
-}
-
-.offline {
-  color: #e05e5e;
-  font-size: 11px;
+@media (max-width: 480px) {
+  .admin-dialog { padding: 29px 22px 24px; border-radius: 17px; }
 }

@@ -1,0 +1,8 @@
+{
+  "profile": "product-workspace",
+  "sourceRoots": ["frontend/src"],
+  "canonicalMap": "DESIGN.md",
+  "ownership": {
+    "Select/Listbox": "native"
+  }
+}
