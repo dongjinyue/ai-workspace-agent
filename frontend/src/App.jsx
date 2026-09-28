@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getAccessToken, isSupabaseConfigured, signInAdmin, signOutAdmin } from "./auth.js";
 import { formatQuotaStatus } from "./usage.js";
 import { createSseParser } from "./streaming.js";
+import { createRunManager, isRunActive } from "./run-manager.js";
 import "./App.css";
 import "./AgentStatus.css";
 import "./ExecutionTrace.css";
@@ -182,7 +183,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [question, setQuestion] = useState("");
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [runViews, setRunViews] = useState([]);
   const [editing, setEditing] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -195,6 +196,19 @@ function App() {
   const [knowledgeDocuments, setKnowledgeDocuments] = useState([]);
   const bottomRef = useRef(null);
   const booted = useRef(false);
+  const runManagerRef = useRef(null);
+
+  // Run 管理器统一维护每个问题的流式状态，避免并发回答互相覆盖。
+  if (runManagerRef.current == null) {
+    runManagerRef.current = createRunManager({
+      streamRequest,
+      request,
+      onChange: setRunViews,
+    });
+  }
+  const runManager = runManagerRef.current;
+  const activeRuns = runViews.filter((run) => isRunActive(run.status));
+  const hasActiveRuns = activeRuns.length > 0;
 
   const role = session?.role;
   const isAdmin = role === "admin";
@@ -309,7 +323,10 @@ function App() {
     restore();
   }, []);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages, loading]);
+  useEffect(() => {
+    // 消息和流式 token（令牌）更新时自动滚动到底部；多个 Run 同时执行也只影响当前视图。
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, runViews]);
 
   async function createConversation() {
     try {
@@ -377,41 +394,39 @@ function App() {
 
   async function sendMessage() {
     const content = question.trim();
-    if (!content || loading || (session?.quota && session.quota.remaining <= 0)) return;
+    if (!content || (session?.quota && session.quota.remaining <= 0)) return;
     setQuestion("");
     setError("");
-    setLoading(true);
+    const run = runManager.start({
+      message: content,
+      conversation_id: conversationId || null,
+      knowledge_base_id: knowledgeBaseId || null,
+    });
     setMessages((items) => [...items,
-      { role: "user", content, created_at: new Date().toISOString() },
-      { role: "assistant", content: "", created_at: new Date().toISOString(), streaming: true },
+      { id: `user-${run.localId}`, role: "user", content, created_at: new Date().toISOString() },
+      { id: `assistant-${run.localId}`, role: "assistant", content: run.content, created_at: new Date().toISOString(), streaming: isRunActive(run.status), runKey: run.localId, runId: run.runId, runStatus: run.status, trace: run.trace },
     ]);
-    try {
-      let finalData = null;
-      let streamedAnswer = "";
-      await streamRequest("/api/agent/chat/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, conversation_id: conversationId || null, knowledge_base_id: knowledgeBaseId || null }) }, (event) => {
-        if (event.event === "token") {
-          streamedAnswer += event.data.content || "";
-          setMessages((items) => items.map((item, index) => index === items.length - 1 ? { ...item, content: streamedAnswer, streaming: false } : item));
+    const activeRole = role;
+    run.done.then(async (completedRun) => {
+      if (completedRun.status === "completed" && completedRun.conversationId) {
+        setConversationId(completedRun.conversationId);
+        localStorage.setItem(activeRole === "admin" ? "conversation_id" : "guest_conversation_id", completedRun.conversationId);
+        try {
+          await refresh(completedRun.conversationId, activeRole);
+          setSession(await request("/api/session"));
+        } catch (refreshError) {
+          setError(refreshError.message);
         }
-        if (event.event === "done") {
-          finalData = event.data;
-          setConversationId(finalData.conversation_id);
-          localStorage.setItem(conversationStorageKey, finalData.conversation_id);
-          setMessages((items) => items.map((item, index) => index === items.length - 1 ? { ...item, content: finalData.answer, created_at: finalData.trace?.completed_at, trace: finalData.trace, streaming: false } : item));
-        }
-      });
-      if (!finalData) throw new Error("流式响应未正常结束，请重试。");
-      await refresh(finalData.conversation_id);
-      const updatedSession = await request("/api/session");
-      setSession(updatedSession);
-    } catch (requestError) {
-      setMessages((items) => items.slice(0, -2));
-      setQuestion(content);
-      if (requestError.status === 429) {
-        try { setSession(await request("/api/session")); } catch { /* 保留原本的限额反馈 */ }
+        return;
       }
-      setError(requestError.message);
-    } finally { setLoading(false); }
+      if (completedRun.status === "failed") {
+        setQuestion((current) => current || content);
+        if (completedRun.error?.status === 429) {
+          try { setSession(await request("/api/session")); } catch { /* 保留原本的限额反馈 */ }
+        }
+        setError(completedRun.error?.message || "Agent 执行失败，请稍后重试。");
+      }
+    });
   }
 
   async function uploadDocument(event) {
@@ -515,22 +530,27 @@ function App() {
           {isAdmin ? <><span className="role-badge">管理员</span><button className="account-button" onClick={logout}>退出</button></> : <><span className="role-badge guest-badge">访客 · {session ? quotaCopy : "正在读取额度…"}</span><button className="account-button" onClick={() => setLoginOpen(true)}>管理员登录</button></>}
         </div>
       </header>
-      <div className="messages" aria-live="polite" aria-busy={loading}>
+      <div className="messages" aria-live="polite" aria-busy={hasActiveRuns}>
         {!messages.length && <div className="welcome"><span aria-hidden="true">✦</span><p className="welcome-eyebrow">AI WORKSPACE</p><h2>{isAdmin ? "欢迎回来" : "今天想解决什么问题？"}</h2><p>{isAdmin ? "管理知识库并开始新的工作对话。" : "直接开始体验 AI 工作区。访客每天可免费提问 10 次。"}</p>
           {!isAdmin && <div className="guest-limit-note"><strong>访客体验说明</strong><span>对话仅对当前浏览器会话可见，每日次数于北京时间午夜重置。</span></div>}
         </div>}
-        {messages.map((message, index) => <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
-          {message.role === "assistant" && <div className="avatar ai" aria-hidden="true">AI</div>}
-          <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(message.trace?.completed_at || message.created_at)}{message.trace?.duration_ms != null ? ` · 用时 ${formatDuration(message.trace.duration_ms)}` : ""}</time></div>{message.role === "assistant" && <ExecutionTrace trace={message.trace} />}{(!message.streaming || message.content) && <div className="bubble">{message.content}</div>}</div>
-          {message.role === "user" && <div className="avatar user" aria-hidden="true">你</div>}
-        </article>)}
-        {loading && <article className="message assistant" aria-label="AI 正在生成回答"><div className="avatar ai" aria-hidden="true">AI</div><div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div></article>}
+        {messages.map((message, index) => {
+          const run = message.runKey ? runViews.find((candidate) => candidate.localId === message.runKey) : null;
+          const liveTrace = run?.trace || message.trace;
+          const liveStreaming = run ? isRunActive(run.status) : message.streaming;
+          const liveContent = run?.content || (run?.error && !liveStreaming ? run.error.message : message.content);
+          return <article className={`message ${message.role}`} key={message.id || `${message.role}-${index}`}>
+            {message.role === "assistant" && <div className="avatar ai" aria-hidden="true">AI</div>}
+            <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(liveTrace?.completed_at || message.created_at)}{liveTrace?.duration_ms != null ? ` · 用时 ${formatDuration(liveTrace.duration_ms)}` : ""}</time></div>{message.role === "assistant" && <ExecutionTrace trace={liveTrace} />}{(!liveStreaming || liveContent) && <div className="bubble">{liveContent}</div>}{message.role === "assistant" && liveStreaming && !liveContent && <div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div>}</div>
+            {message.role === "user" && <div className="avatar user" aria-hidden="true">你</div>}
+          </article>;
+        })}
         <div ref={bottomRef} />
       </div>
       <footer>
         <div className="quota-banner" role="status"><span>{session ? quotaCopy : "正在读取使用额度…"}</span>{!isAdmin && session?.quota && <span>IP 保护：每分钟 5 次，全天 30 次</span>}</div>
         {error && <div className="error" role="alert">{error}</div>}
-        <div className="composer"><textarea className="resize-none" aria-label="输入你的问题" rows="1" maxLength="4000" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage(); } }} placeholder={exhausted ? "今日访客提问次数已用完" : "输入你的问题…"} disabled={!session || loading || exhausted} /><button aria-label="发送问题" onClick={sendMessage} disabled={!question.trim() || loading || !session || exhausted} aria-busy={loading}>↑</button></div>
+        <div className="composer"><textarea className="resize-none" aria-label="输入你的问题" rows="1" maxLength="4000" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage(); } }} placeholder={exhausted ? "今日访客提问次数已用完" : "输入你的问题…"} disabled={!session || exhausted} /><button aria-label="发送问题" onClick={sendMessage} disabled={!question.trim() || !session || exhausted} aria-busy={hasActiveRuns}>↑</button></div>
         <small>Enter 发送 · Shift + Enter 换行 · {isAdmin ? "管理员模式不受访客次数限制" : "每日 10 次 · 北京时间午夜重置"}</small>
       </footer>
     </section>
