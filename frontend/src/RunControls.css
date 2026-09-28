@@ -1,0 +1,69 @@
+.run-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.run-status {
+  margin-right: 2px;
+  color: #697386;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.run-status-running,
+.run-status-queued {
+  color: #4d63c9;
+}
+
+.run-status-paused,
+.run-status-pause_requested {
+  color: #a06b18;
+}
+
+.run-status-failed,
+.run-status-timed_out,
+.run-status-stopped {
+  color: #b04747;
+}
+
+.run-controls button {
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid #dfe4ec;
+  border-radius: 6px;
+  color: #55617a;
+  background: #fff;
+  font-size: 10px;
+}
+
+.run-controls button:hover:not(:disabled) {
+  border-color: #8b8ce5;
+  color: #514dc7;
+}
+
+.run-controls button:disabled {
+  color: #aeb5c3;
+  background: #f5f6f9;
+  cursor: not-allowed;
+}
+
+.run-controls .run-stop {
+  color: #a33d3d;
+}
+
+.run-controls .run-close {
+  color: #8b93a3;
+}
+
+.run-error {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #9c3333;
+  background: #fff3f3;
+  font-size: 11px;
+  line-height: 1.5;
+}

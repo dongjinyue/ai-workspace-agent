@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createRunManager } from "./run-manager.js";
+import {
+  createRunManager,
+  getRunControlState,
+  getRunStatusLabel,
+  getSafeRagDebug,
+  getSafeRunError,
+} from "./run-manager.js";
 
 function fakeStreamFactory() {
   const calls = [];
@@ -111,4 +117,54 @@ test("失败 Run 可以重试，重试会创建新的 Run", async () => {
   assert.equal(failed.status, "failed");
   assert.equal(retried.runId, "run-2");
   assert.equal(retried.answer, "重试成功");
+});
+
+test("Run 状态文案和按钮状态能够区分暂停、停止与重试", () => {
+  assert.equal(getRunStatusLabel("pause_requested"), "正在暂停");
+  assert.equal(getRunStatusLabel("paused"), "已暂停");
+  assert.equal(getRunStatusLabel("timed_out"), "已超时");
+  assert.deepEqual(getRunControlState("running"), {
+    canPause: true,
+    canResume: false,
+    canCancel: true,
+    canRetry: false,
+  });
+  assert.deepEqual(getRunControlState("paused"), {
+    canPause: false,
+    canResume: true,
+    canCancel: true,
+    canRetry: false,
+  });
+  assert.deepEqual(getRunControlState("failed"), {
+    canPause: false,
+    canResume: false,
+    canCancel: false,
+    canRetry: true,
+  });
+});
+
+test("检索调试信息只保留 TopK、阈值和数值匹配元数据", () => {
+  const safe = getSafeRagDebug({
+    top_k: 5,
+    max_distance: 0.45,
+    returned: 1,
+    matches: [{ rank: 1, similarity: 0.91, distance: 0.09, text: "不要显示这段文档" }],
+  });
+  assert.deepEqual(safe, {
+    topK: 5,
+    maxDistance: 0.45,
+    returned: 1,
+    matches: [{ rank: 1, similarity: 0.91, distance: 0.09 }],
+  });
+  assert.equal(JSON.stringify(safe).includes("不要显示这段文档"), false);
+});
+
+test("错误详情不把内部堆栈或 API Key 展示给用户", () => {
+  const safe = getSafeRunError({
+    status: 502,
+    message: "Traceback ... sk-secret-key ... backend/app/main.py:99",
+  });
+  assert.equal(safe.message, "模型服务暂时不可用，请重试。");
+  assert.equal(safe.message.includes("sk-"), false);
+  assert.equal(getSafeRunError({ status: 429 }).message, "今日访客额度已用完，请稍后再试。");
 });

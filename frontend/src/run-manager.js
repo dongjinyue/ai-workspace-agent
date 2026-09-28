@@ -5,16 +5,71 @@ const ACTIVE_STATUSES = new Set([
   "paused",
 ]);
 
+const STATUS_LABELS = {
+  queued: "排队中",
+  running: "运行中",
+  pause_requested: "正在暂停",
+  paused: "已暂停",
+  completed: "已完成",
+  stopped: "已停止",
+  timed_out: "已超时",
+  failed: "失败",
+};
+
+const STATUS_ERROR_MESSAGES = {
+  401: "登录状态已失效，请重新登录。",
+  403: "没有权限执行此任务。",
+  404: "任务不存在或已过期。",
+  408: "任务执行超时，请重试。",
+  429: "今日访客额度已用完，请稍后再试。",
+  502: "模型服务暂时不可用，请重试。",
+  503: "模型服务暂时不可用，请重试。",
+  504: "任务执行超时，请重试。",
+};
+
 export function isRunActive(status) {
   return ACTIVE_STATUSES.has(status);
 }
 
-function safeError(error, fallback = "Agent 执行失败，请稍后重试。") {
+export function getRunStatusLabel(status) {
+  return STATUS_LABELS[status] || "处理中";
+}
+
+export function getRunControlState(status) {
   return {
-    message: error?.message || fallback,
-    status: error?.status,
-    retryable: true,
+    canPause: status === "queued" || status === "running",
+    canResume: status === "paused",
+    canCancel: isRunActive(status),
+    canRetry: status === "failed" || status === "timed_out" || status === "stopped",
   };
+}
+
+export function getSafeRunError(error, fallback = "Agent 执行失败，请稍后重试。") {
+  const status = Number(error?.status);
+  const rawMessage = typeof error?.message === "string" ? error.message.trim() : "";
+  const containsInternalDetail = /Traceback|Exception|API[_ ]?KEY|(?:^|\s)sk-[A-Za-z0-9]|\.py:\d+|\bat\s+[^\s]+\s*\(/i.test(rawMessage);
+  const message = STATUS_ERROR_MESSAGES[status] || (rawMessage && !containsInternalDetail ? rawMessage.slice(0, 240) : fallback);
+  return { message, status: Number.isFinite(status) ? status : undefined, retryable: true };
+}
+
+export function getSafeRagDebug(rag) {
+  if (!rag || typeof rag !== "object") return null;
+  const numberOrNull = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  const topK = numberOrNull(rag.top_k);
+  const maxDistance = numberOrNull(rag.max_distance);
+  const returned = numberOrNull(rag.returned);
+  const matches = Array.isArray(rag.matches)
+    ? rag.matches.map((match) => ({
+      rank: numberOrNull(match?.rank),
+      similarity: numberOrNull(match?.similarity),
+      distance: numberOrNull(match?.distance),
+    }))
+    : [];
+  return { topK, maxDistance, returned, matches };
+}
+
+function safeError(error, fallback = "Agent 执行失败，请稍后重试。") {
+  return getSafeRunError(error, fallback);
 }
 
 /**
@@ -186,7 +241,9 @@ export function createRunManager({
     async resume(run) {
       if (!run.runId) throw new Error("任务尚未取得执行标识，请稍后重试。");
       update(run, { status: "running", error: null });
-      return consume(run, `/api/agent/runs/${run.runId}/resume`);
+      // 恢复会替换当前订阅 Promise，让页面可以继续等待同一个 Run 的最终状态。
+      run.done = consume(run, `/api/agent/runs/${run.runId}/resume`);
+      return run.done;
     },
     retry(run, payload = run.payload) {
       return createRun({ ...payload });

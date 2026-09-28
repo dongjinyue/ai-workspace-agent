@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { getAccessToken, isSupabaseConfigured, signInAdmin, signOutAdmin } from "./auth.js";
 import { formatQuotaStatus } from "./usage.js";
 import { createSseParser } from "./streaming.js";
-import { createRunManager, isRunActive } from "./run-manager.js";
+import { createRunManager, getRunControlState, getRunStatusLabel, getSafeRagDebug, getSafeRunError, isRunActive } from "./run-manager.js";
 import "./App.css";
 import "./AgentStatus.css";
 import "./ExecutionTrace.css";
+import "./RunControls.css";
 import "./Auth.css";
 import "./KnowledgeBase.css";
 
@@ -76,6 +77,7 @@ function formatDuration(milliseconds) {
 function ExecutionTrace({ trace }) {
   if (!trace) return null;
   const tools = trace.tools || [];
+  const rag = getSafeRagDebug(trace.rag);
   return <details className="execution-trace">
     <summary><span>⌁</span> 查看工作过程 <b>⌄</b></summary>
     <div className="trace-panel">
@@ -83,9 +85,10 @@ function ExecutionTrace({ trace }) {
       <ol>
         <li><i>1</i><div><strong>理解并规划任务</strong><small>Agent 共执行 {trace.steps} 个步骤</small></div></li>
         {tools.map((tool, index) => <li key={`${tool.name}-${index}`}><i>{index + 2}</i><div><strong>调用工具 · {tool.name}</strong><small>{tool.source === "mcp" ? `MCP 服务${tool.server ? ` · ${tool.server}` : ""}` : "本地安全工具"} · {formatDuration(tool.duration_ms)}</small></div></li>)}
-        {trace.rag?.hit && <li><i>{tools.length + 2}</i><div><strong>检索知识库</strong><small>命中 {trace.rag.results} 个相关片段</small></div></li>}
+        {rag && <li><i>{tools.length + 2}</i><div><strong>检索知识库</strong><small>TopK {rag.topK ?? "—"} · 距离阈值 {rag.maxDistance ?? "—"} · 返回 {rag.returned ?? "—"} 条</small></div></li>}
         <li><i>✓</i><div><strong>生成并检查回答</strong><small>模型调用 {trace.llm_calls} 次 · 模型耗时 {formatDuration(trace.llm_duration_ms)}</small></div></li>
       </ol>
+      {rag?.matches?.length > 0 && <div className="trace-rag-debug"><strong>匹配详情</strong>{rag.matches.map((match) => <span key={`${match.rank}-${match.distance}`}>#{match.rank ?? "—"} · 相似度 {match.similarity ?? "—"} · 距离 {match.distance ?? "—"}</span>)}</div>}
       <div className="trace-total"><span>总耗时</span><strong>{formatDuration(trace.duration_ms)}</strong></div>
     </div>
   </details>;
@@ -392,21 +395,7 @@ function App() {
     });
   }
 
-  async function sendMessage() {
-    const content = question.trim();
-    if (!content || (session?.quota && session.quota.remaining <= 0)) return;
-    setQuestion("");
-    setError("");
-    const run = runManager.start({
-      message: content,
-      conversation_id: conversationId || null,
-      knowledge_base_id: knowledgeBaseId || null,
-    });
-    setMessages((items) => [...items,
-      { id: `user-${run.localId}`, role: "user", content, created_at: new Date().toISOString() },
-      { id: `assistant-${run.localId}`, role: "assistant", content: run.content, created_at: new Date().toISOString(), streaming: isRunActive(run.status), runKey: run.localId, runId: run.runId, runStatus: run.status, trace: run.trace },
-    ]);
-    const activeRole = role;
+  function watchRun(run, content, activeRole) {
     run.done.then(async (completedRun) => {
       if (completedRun.status === "completed" && completedRun.conversationId) {
         setConversationId(completedRun.conversationId);
@@ -427,6 +416,54 @@ function App() {
         setError(completedRun.error?.message || "Agent 执行失败，请稍后重试。");
       }
     });
+  }
+
+  async function handleRunAction(action, run) {
+    try {
+      if (action === "retry") {
+        const retried = runManager.retry(run);
+        setMessages((items) => [...items, {
+          id: `assistant-${retried.localId}`,
+          role: "assistant",
+          content: "",
+          created_at: new Date().toISOString(),
+          streaming: true,
+          runKey: retried.localId,
+          retryOf: run.localId,
+        }]);
+        watchRun(retried, run.payload.message || "", role);
+        return;
+      }
+      if (action === "pause") await runManager.pause(run);
+      if (action === "resume") {
+        await runManager.resume(run);
+        watchRun(run, run.payload.message || "", role);
+      }
+      if (action === "cancel") await runManager.cancel(run);
+    } catch (actionError) {
+      setError(getSafeRunError(actionError).message);
+    }
+  }
+
+  function dismissRun(run) {
+    setMessages((items) => items.map((item) => item.runKey === run.localId ? { ...item, dismissed: true } : item));
+  }
+
+  async function sendMessage() {
+    const content = question.trim();
+    if (!content || (session?.quota && session.quota.remaining <= 0)) return;
+    setQuestion("");
+    setError("");
+    const run = runManager.start({
+      message: content,
+      conversation_id: conversationId || null,
+      knowledge_base_id: knowledgeBaseId || null,
+    });
+    setMessages((items) => [...items,
+      { id: `user-${run.localId}`, role: "user", content, created_at: new Date().toISOString() },
+      { id: `assistant-${run.localId}`, role: "assistant", content: run.content, created_at: new Date().toISOString(), streaming: isRunActive(run.status), runKey: run.localId, runId: run.runId, runStatus: run.status, trace: run.trace },
+    ]);
+    watchRun(run, content, role);
   }
 
   async function uploadDocument(event) {
@@ -535,13 +572,15 @@ function App() {
           {!isAdmin && <div className="guest-limit-note"><strong>访客体验说明</strong><span>对话仅对当前浏览器会话可见，每日次数于北京时间午夜重置。</span></div>}
         </div>}
         {messages.map((message, index) => {
+          if (message.dismissed) return null;
           const run = message.runKey ? runViews.find((candidate) => candidate.localId === message.runKey) : null;
           const liveTrace = run?.trace || message.trace;
           const liveStreaming = run ? isRunActive(run.status) : message.streaming;
           const liveContent = run?.content || (run?.error && !liveStreaming ? run.error.message : message.content);
+          const controlState = run ? getRunControlState(run.status) : null;
           return <article className={`message ${message.role}`} key={message.id || `${message.role}-${index}`}>
             {message.role === "assistant" && <div className="avatar ai" aria-hidden="true">AI</div>}
-            <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(liveTrace?.completed_at || message.created_at)}{liveTrace?.duration_ms != null ? ` · 用时 ${formatDuration(liveTrace.duration_ms)}` : ""}</time></div>{message.role === "assistant" && <ExecutionTrace trace={liveTrace} />}{(!liveStreaming || liveContent) && <div className="bubble">{liveContent}</div>}{message.role === "assistant" && liveStreaming && !liveContent && <div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div>}</div>
+            <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(liveTrace?.completed_at || message.created_at)}{liveTrace?.duration_ms != null ? ` · 用时 ${formatDuration(liveTrace.duration_ms)}` : ""}</time></div>{run && <div className="run-controls" aria-label={`任务状态：${getRunStatusLabel(run.status)}`}><span className={`run-status run-status-${run.status}`}>{getRunStatusLabel(run.status)}</span>{controlState.canPause && <button type="button" onClick={() => handleRunAction("pause", run)} disabled={!run.runId}>暂停</button>}{controlState.canResume && <button type="button" onClick={() => handleRunAction("resume", run)} disabled={!run.runId}>继续</button>}{controlState.canCancel && <button type="button" className="run-stop" onClick={() => handleRunAction("cancel", run)} disabled={!run.runId}>停止</button>}{controlState.canRetry && <button type="button" onClick={() => handleRunAction("retry", run)}>重试</button>}{!liveStreaming && (controlState.canRetry || run.status === "completed") && <button type="button" className="run-close" onClick={() => dismissRun(run)}>关闭</button>}</div>}{run?.error && !liveStreaming && <div className="run-error" role="status">{run.error.message}</div>}{message.role === "assistant" && <ExecutionTrace trace={liveTrace} />}{(!liveStreaming || liveContent) && <div className="bubble">{liveContent}</div>}{message.role === "assistant" && liveStreaming && !liveContent && <div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div>}</div>
             {message.role === "user" && <div className="avatar user" aria-hidden="true">你</div>}
           </article>;
         })}
