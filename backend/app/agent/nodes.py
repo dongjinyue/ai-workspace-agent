@@ -16,11 +16,6 @@ MAX_STEPS = 5
 NO_KNOWLEDGE_ANSWER = "当前知识库中没有找到相关信息。"
 MAX_TOOL_CALLS = 1
 
-KNOWLEDGE_INTENT_KEYWORDS = (
-    "审核", "审批", "流程", "配置", "项目", "政策", "制度", "规定",
-    "操作手册", "文档", "资料", "知识库", "富士康", "报销", "账户",
-    "票据", "建设内容", "投资", "批复",
-)
 KNOWLEDGE_INFO_KEYWORDS = (
     "多少文档", "多少文件", "几篇文档", "几份文档", "有哪些文档",
     "哪些文档", "文档列表", "文件列表", "文档名称",
@@ -72,8 +67,11 @@ TEXT_STATS_KEYWORDS = (
 
 def _is_greeting(message: str) -> bool:
     """只把明确的寒暄交给模型，避免知识库默认路由干扰自然对话。"""
-    normalized = message.strip().lower()
-    return normalized in GREETING_MESSAGES
+    normalized = re.sub(r"[\s，。！？、,.!?]+", "", message.strip().lower())
+    return bool(
+        normalized in GREETING_MESSAGES
+        or re.fullmatch(r"(你好|您好|嗨)(今天怎么样|最近怎么样|今天好吗)?", normalized)
+    )
 
 
 def _has_arithmetic_expression(message: str) -> bool:
@@ -120,16 +118,8 @@ def select_required_tool(state: AgentState, available_tools: list[dict]) -> str 
         keyword in last_user_message for keyword in TEXT_STATS_KEYWORDS
     ):
         return "calculate_text_stats"
-    if "search_knowledge_base" in available_names and (
-        state.get("active_skill")
-        or any(keyword in last_user_message for keyword in KNOWLEDGE_INTENT_KEYWORDS)
-        or last_user_message.strip()
-    ):
-        return (
-            "search_knowledge_base"
-            if "search_knowledge_base" in available_names
-            else None
-        )
+    if "search_knowledge_base" in available_names and last_user_message.strip():
+        return "search_knowledge_base"
     return None
 
 SYSTEM_PROMPT = (

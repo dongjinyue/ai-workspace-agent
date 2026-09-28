@@ -106,7 +106,7 @@ def test_substantive_question_defaults_to_search_when_knowledge_base_is_selected
 
 def test_selected_knowledge_base_keeps_greetings_on_auto_routing():
     state = _state(None)
-    state["messages"] = [{"role": "user", "content": "你好"}]
+    state["messages"] = [{"role": "user", "content": "你好，今天怎么样？"}]
     schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
 
     assert select_required_tool(state, schemas) is None
