@@ -76,6 +76,47 @@ def init_database() -> None:
         )
         connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                run_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                user_message_id INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN (
+                        'queued', 'running', 'pause_requested', 'paused',
+                        'completed', 'stopped', 'timed_out', 'failed'
+                    )
+                ),
+                checkpoint_json TEXT,
+                answer_prefix TEXT NOT NULL DEFAULT '',
+                error_code TEXT,
+                error_message TEXT,
+                quota_reserved INTEGER NOT NULL DEFAULT 0 CHECK (quota_reserved IN (0, 1)),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                FOREIGN KEY (conversation_id)
+                    REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_message_id)
+                    REFERENCES messages(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_conversation_updated
+            ON agent_tasks (conversation_id, updated_at DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_tasks_owner_status
+            ON agent_tasks (owner_id, status, updated_at DESC)
+            """
+        )
+        connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS knowledge_bases (
                 id TEXT PRIMARY KEY,
                 filename TEXT NOT NULL,

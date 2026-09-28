@@ -5,8 +5,222 @@ from uuid import uuid4
 from app.memory.database import get_connection, init_database
 
 
+TASK_STATUSES = frozenset(
+    {
+        "queued",
+        "running",
+        "pause_requested",
+        "paused",
+        "completed",
+        "stopped",
+        "timed_out",
+        "failed",
+    }
+)
+TERMINAL_TASK_STATUSES = frozenset(
+    {"completed", "stopped", "timed_out", "failed"}
+)
+TASK_TRANSITIONS: dict[str, frozenset[str]] = {
+    "queued": frozenset({"running", "stopped", "timed_out", "failed"}),
+    "running": frozenset(
+        {"pause_requested", "completed", "stopped", "timed_out", "failed"}
+    ),
+    "pause_requested": frozenset(
+        {"paused", "completed", "stopped", "timed_out", "failed"}
+    ),
+    "paused": frozenset({"running", "stopped", "timed_out", "failed"}),
+    "completed": frozenset(),
+    "stopped": frozenset(),
+    "timed_out": frozenset(),
+    "failed": frozenset(),
+}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _task_row_to_dict(row) -> dict:
+    item = dict(row)
+    raw_checkpoint = item.pop("checkpoint_json", None)
+    item["checkpoint"] = json.loads(raw_checkpoint) if raw_checkpoint else None
+    item["quota_reserved"] = bool(item["quota_reserved"])
+    return item
+
+
+def _checkpoint_json(checkpoint: dict | str | None) -> str | None:
+    if checkpoint is None:
+        return None
+    if isinstance(checkpoint, str):
+        # 允许恢复接口直接传递已序列化的检查点，但先验证它确实是 JSON。
+        json.loads(checkpoint)
+        return checkpoint
+    return json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"))
+
+
+def create_agent_task(
+    conversation_id: str,
+    owner_id: str,
+    user_message_id: int,
+    *,
+    run_id: str | None = None,
+    status: str = "queued",
+    checkpoint: dict | str | None = None,
+    answer_prefix: str = "",
+    quota_reserved: bool = False,
+) -> dict:
+    """创建一个带资源归属和额度占用标记的 Agent Run（执行任务）。"""
+    if status not in TASK_STATUSES:
+        raise ValueError(f"不支持的任务状态：{status}")
+    if status != "queued":
+        raise ValueError("新任务必须从 queued 状态开始")
+    init_database()
+    task_id = run_id or uuid4().hex
+    now = _now()
+    checkpoint_value = _checkpoint_json(checkpoint)
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO agent_tasks (
+                run_id, conversation_id, owner_id, user_message_id, status,
+                checkpoint_json, answer_prefix, quota_reserved,
+                created_at, updated_at
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE EXISTS (
+                SELECT 1 FROM conversations
+                WHERE id = ? AND owner_id = ?
+            ) AND EXISTS (
+                SELECT 1 FROM messages
+                WHERE id = ? AND conversation_id = ?
+            )
+            """,
+            (
+                task_id,
+                conversation_id,
+                owner_id,
+                user_message_id,
+                status,
+                checkpoint_value,
+                answer_prefix,
+                int(quota_reserved),
+                now,
+                now,
+                conversation_id,
+                owner_id,
+                user_message_id,
+                conversation_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise LookupError("会话或用户消息不存在")
+        row = connection.execute(
+            "SELECT * FROM agent_tasks WHERE run_id = ? AND owner_id = ?",
+            (task_id, owner_id),
+        ).fetchone()
+    return _task_row_to_dict(row)
+
+
+def get_agent_task(run_id: str, owner_id: str) -> dict | None:
+    """只读取当前身份拥有的任务，run_id 本身不作为授权凭证。"""
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM agent_tasks WHERE run_id = ? AND owner_id = ?",
+            (run_id, owner_id),
+        ).fetchone()
+    return _task_row_to_dict(row) if row else None
+
+
+def list_agent_tasks(
+    conversation_id: str | None = None,
+    *,
+    owner_id: str,
+    statuses: set[str] | tuple[str, ...] | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """按会话和状态列出当前身份可见的任务。"""
+    if limit < 1 or limit > 100:
+        raise ValueError("任务查询数量必须在 1 到 100 之间")
+    if statuses is not None and not set(statuses).issubset(TASK_STATUSES):
+        raise ValueError("任务状态筛选条件无效")
+    init_database()
+    clauses = ["owner_id = ?"]
+    parameters: list = [owner_id]
+    if conversation_id is not None:
+        clauses.append("conversation_id = ?")
+        parameters.append(conversation_id)
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        clauses.append(f"status IN ({placeholders})")
+        parameters.extend(statuses)
+    parameters.append(limit)
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT * FROM agent_tasks WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY updated_at DESC LIMIT ?",
+            parameters,
+        ).fetchall()
+    return [_task_row_to_dict(row) for row in rows]
+
+
+def update_agent_task(
+    run_id: str,
+    owner_id: str,
+    *,
+    expected_statuses: set[str] | tuple[str, ...],
+    status: str | None = None,
+    checkpoint: dict | str | None = None,
+    answer_prefix: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """带期望状态条件更新任务，避免暂停和完成并发时互相覆盖。"""
+    expected = set(expected_statuses)
+    if not expected or not expected.issubset(TASK_STATUSES):
+        raise ValueError("期望状态不能为空且必须有效")
+    if status is not None:
+        if status not in TASK_STATUSES:
+            raise ValueError(f"不支持的任务状态：{status}")
+        if not any(status in TASK_TRANSITIONS[item] for item in expected):
+            raise ValueError("不允许的任务状态转换")
+
+    assignments = ["updated_at = ?"]
+    values: list = [_now()]
+    if status is not None:
+        assignments.append("status = ?")
+        values.append(status)
+        if status == "running":
+            assignments.append("started_at = COALESCE(started_at, ?)")
+            values.append(_now())
+        if status in TERMINAL_TASK_STATUSES:
+            assignments.append("finished_at = ?")
+            values.append(_now())
+    if checkpoint is not None:
+        assignments.append("checkpoint_json = ?")
+        values.append(_checkpoint_json(checkpoint))
+    if answer_prefix is not None:
+        assignments.append("answer_prefix = ?")
+        values.append(answer_prefix)
+    if error_code is not None:
+        assignments.append("error_code = ?")
+        values.append(error_code)
+    if error_message is not None:
+        assignments.append("error_message = ?")
+        values.append(error_message)
+
+    placeholders = ", ".join("?" for _ in expected)
+    values.extend([run_id, owner_id, *expected])
+    init_database()
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "UPDATE agent_tasks SET "
+            + ", ".join(assignments)
+            + f" WHERE run_id = ? AND owner_id = ? AND status IN ({placeholders})",
+            values,
+        )
+    return cursor.rowcount > 0
 
 
 def get_guest_ai_request_count(session_hash: str, local_date: str) -> int:
