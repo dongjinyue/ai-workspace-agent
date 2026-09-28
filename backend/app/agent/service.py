@@ -41,6 +41,8 @@ class AgentResult:
     tool_source: str | None = None
     mcp_server: str | None = None
     llm_called: bool = True
+    # 可暂停执行器使用；普通同步调用始终为 completed。
+    status: str = "completed"
 
 
 def execute_tool(
