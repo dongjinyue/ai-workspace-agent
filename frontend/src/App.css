@@ -5,7 +5,8 @@ button { cursor: pointer; }
 .sidebar { z-index: 5; display: flex; flex: 0 0 292px; flex-direction: column; width: 292px; padding: 24px 16px 18px; color: #e5e7eb; background: #111827; }
 .brand { display: flex; align-items: center; gap: 11px; padding: 0 8px 24px; }
 .brand > span, .avatar { display: grid; place-items: center; color: #fff; font-weight: 800; }
-.brand > span { width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(145deg,#7067f0,#4f46e5); box-shadow: 0 8px 22px #4f46e555; }
+.brand-mark { width: 44px; height: 44px; align-content: center; gap: 1px; flex: 0 0 44px; border-radius: 13px; background: linear-gradient(145deg,#7067f0,#4f46e5); box-shadow: 0 8px 22px #4f46e555; font-size: 11px; line-height: 1.05; letter-spacing: .04em; }
+.brand-mark b { display: block; font-weight: 800; }
 .brand div { display: flex; flex-direction: column; }
 .brand small { margin-top: 3px; color: #7f8ca3; font-size: 11px; }
 .new-chat { padding: 11px 14px; border: 1px solid #3d4658; border-radius: 10px; color: #fff; background: #1d2637; text-align: left; }

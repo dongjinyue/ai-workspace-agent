@@ -426,7 +426,7 @@ function App() {
     <button className="mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="打开会话列表" aria-expanded={sidebarOpen}>☰</button>
     {sidebarOpen && <button className="sidebar-mask" onClick={() => setSidebarOpen(false)} aria-label="关闭会话列表" />}
     <aside className={`sidebar ${sidebarOpen ? "open" : ""}`} aria-label="工作区侧栏">
-      <div className="brand"><span>AI</span><div><strong>Workspace</strong><small>智能工作台</small></div></div>
+      <div className="brand"><span className="brand-mark" aria-label="人工智能"><b>人工</b><b>智能</b></span><div><strong>Workspace</strong><small>智能工作台</small></div></div>
       <button className="new-chat" onClick={createConversation} disabled={!session}>＋ 新建会话</button>
       <p className="section-label">最近会话</p>
       <div className="conversation-list">
