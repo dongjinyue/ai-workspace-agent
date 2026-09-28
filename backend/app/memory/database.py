@@ -80,7 +80,7 @@ def init_database() -> None:
                 run_id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
                 owner_id TEXT NOT NULL,
-                user_message_id INTEGER NOT NULL,
+                user_message_id INTEGER,
                 status TEXT NOT NULL CHECK (
                     status IN (
                         'queued', 'running', 'pause_requested', 'paused',

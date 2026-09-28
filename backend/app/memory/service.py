@@ -180,6 +180,147 @@ class ConversationService:
                 trace=trace,
             )
 
+    def run_resumable_task(
+        self,
+        *,
+        run_id: str,
+        message: str,
+        knowledge_base_id: str | None,
+        conversation_id: str,
+        owner_id: str,
+        allowed_tools: frozenset[str] | None,
+        control,
+        checkpoint_callback,
+        status_callback,
+        on_token=None,
+    ) -> ConversationTurnResult:
+        """在会话锁内执行可恢复 Run，避免并发问题交叉写入消息。"""
+        from app.agent.checkpoint import deserialize_agent_state, serialize_agent_state
+        from app.agent.runner import run_resumable_agent
+        from app.skills.registry import select_skill
+
+        task = repository.get_agent_task(run_id, owner_id)
+        if task is None or task["conversation_id"] != conversation_id:
+            raise ConversationNotFoundError("任务不存在")
+
+        request_started = perf_counter()
+        started_at = datetime.now(timezone.utc).isoformat()
+        with self._conversation_lock(conversation_id):
+            if task["user_message_id"] is None:
+                user_message_id = repository.save_message(
+                    conversation_id, "user", message, owner_id=owner_id
+                )
+                repository.use_first_message_as_title(
+                    conversation_id, message, owner_id=owner_id
+                )
+                repository.update_agent_task(
+                    run_id,
+                    owner_id,
+                    expected_statuses={"running", "pause_requested"},
+                    user_message_id=user_message_id,
+                )
+
+            if task["checkpoint"]:
+                initial_state = deserialize_agent_state(task["checkpoint"])
+                initial_state["stream_callback"] = on_token
+                initial_state["allowed_tools"] = allowed_tools
+            else:
+                history = repository.get_messages(
+                    conversation_id,
+                    limit=HISTORY_WINDOW,
+                    owner_id=owner_id,
+                )
+                skill = select_skill(message)
+                initial_state = {
+                    "messages": [
+                        {"role": item["role"], "content": item["content"]}
+                        for item in history
+                    ],
+                    "conversation_id": conversation_id,
+                    "knowledge_base_id": knowledge_base_id,
+                    "active_skill": skill.name if skill else None,
+                    "steps": 0,
+                    "tools_used": [],
+                    "matched_chunks": 0,
+                    "retrieved_chunks": [],
+                    "final_answer": None,
+                    "tool_traces": [],
+                    "llm_calls": 0,
+                    "llm_duration_ms": 0.0,
+                    "retrieval_debug": {},
+                    "allowed_tools": allowed_tools,
+                    "stream_callback": on_token,
+                }
+
+            result = run_resumable_agent(
+                initial_state,
+                control=control,
+                checkpoint_callback=checkpoint_callback,
+                status_callback=status_callback,
+                on_token=on_token,
+            )
+            duration_ms = round((perf_counter() - request_started) * 1000, 3)
+            rag_trace: dict = {
+                "hit": result.matched_chunks > 0,
+                "results": result.matched_chunks,
+            }
+            retrieval_debug = result.retrieval_debug or {}
+            for key in ("top_k", "max_distance", "returned", "matches"):
+                if key in retrieval_debug:
+                    rag_trace[key] = retrieval_debug[key]
+            trace = RequestTrace(
+                request_id=run_id,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                duration_ms=duration_ms,
+                steps=result.steps,
+                skill=result.active_skill,
+                tools=result.tool_traces or [],
+                rag=rag_trace,
+                llm_calls=result.llm_calls,
+                llm_duration_ms=result.llm_duration_ms,
+            )
+            if result.status == "completed":
+                repository.save_assistant_message_with_trace(
+                    conversation_id,
+                    result.answer,
+                    trace.to_dict(),
+                    owner_id=owner_id,
+                )
+                repository.update_agent_task(
+                    run_id,
+                    owner_id,
+                    expected_statuses={"running"},
+                    status="completed",
+                    checkpoint=serialize_agent_state(initial_state),
+                )
+            elif result.status == "stopped":
+                repository.update_agent_task(
+                    run_id,
+                    owner_id,
+                    expected_statuses={"running", "pause_requested"},
+                    status="stopped",
+                )
+            elif result.status == "timed_out":
+                repository.update_agent_task(
+                    run_id,
+                    owner_id,
+                    expected_statuses={"running", "pause_requested"},
+                    status="timed_out",
+                    error_code="timeout",
+                    error_message="任务执行超时，请重试",
+                )
+            return ConversationTurnResult(
+                conversation_id=conversation_id,
+                history_messages=len(
+                    repository.get_messages(
+                        conversation_id, limit=HISTORY_WINDOW, owner_id=owner_id
+                    )
+                ),
+                agent=result,
+                trace=trace,
+            )
+
     def get_history(
         self, conversation_id: str, *, owner_id: str
     ) -> list[dict[str, str]]:

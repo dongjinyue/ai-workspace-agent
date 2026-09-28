@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 import os
-import queue
 import re
 import threading
 from pathlib import Path
@@ -33,9 +32,12 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, StreamingResponse
 
 from app.auth import AuthenticationError, Principal, resolve_principal
+from app.agent.checkpoint import serialize_agent_state
+from app.agent.run_manager import RunManager
 from app.agent.service import GUEST_ALLOWED_TOOLS
 from app.agent.llm import ModelServiceUnavailableError
 from app.memory.database import init_database
+from app.memory import repository
 from app.memory.service import ConversationNotFoundError, ConversationService
 from app.observability import configure_logging
 from app.quotas import (
@@ -76,6 +78,7 @@ configure_logging()
 app = FastAPI()
 init_database()
 conversation_service = ConversationService()
+agent_run_manager = RunManager()
 rate_limiter = InMemoryRateLimiter(
     int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "60"))
 )
@@ -267,42 +270,8 @@ def _chat(
     if not message:
         raise HTTPException(status_code=400, detail="消息不能为空")
 
-    if principal.role == "guest" and request.knowledge_base_id:
-        public_knowledge_base = get_public_knowledge_base(
-            request.knowledge_base_id,
-            get_public_knowledge_base_ids(),
-            owner_id=principal.owner_id,
-        )
-        if public_knowledge_base is None:
-            raise HTTPException(status_code=404, detail="知识库不存在")
-
-    if principal.role == "guest":
-        if not principal.guest_session_hash:
-            raise HTTPException(status_code=503, detail="访客额度服务暂时不可用")
-        try:
-            reserve_guest_ai_request(
-                principal.guest_session_hash,
-                hash_client_ip(http_request),
-                datetime.now(timezone.utc),
-            )
-        except GuestQuotaExceeded as error:
-            retry_seconds = max(
-                1,
-                int(
-                    (
-                        error.retry_at.astimezone(timezone.utc)
-                        - datetime.now(timezone.utc)
-                    ).total_seconds()
-                ),
-            )
-            raise HTTPException(
-                status_code=429,
-                detail="访客 AI 请求额度已达上限，请在额度恢复后重试",
-                headers={
-                    "Retry-After": str(retry_seconds),
-                    "X-Quota-Reset": error.retry_at.isoformat(),
-                },
-            ) from error
+    _validate_knowledge_access(request, principal)
+    _reserve_guest_quota(principal, http_request)
 
     try:
         turn = conversation_service.chat(
@@ -345,6 +314,50 @@ def _chat(
         ) from error
 
 
+def _validate_knowledge_access(request: ChatRequest, principal: Principal) -> None:
+    """校验访客只能使用公开或自己拥有的知识库。"""
+    if principal.role == "guest" and request.knowledge_base_id:
+        public_knowledge_base = get_public_knowledge_base(
+            request.knowledge_base_id,
+            get_public_knowledge_base_ids(),
+            owner_id=principal.owner_id,
+        )
+        if public_knowledge_base is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+
+
+def _reserve_guest_quota(principal: Principal, http_request: Request) -> None:
+    """创建新 Run 时预占一次额度；恢复和断线重连不会调用此函数。"""
+    if principal.role != "guest":
+        return
+    if not principal.guest_session_hash:
+        raise HTTPException(status_code=503, detail="访客额度服务暂时不可用")
+    try:
+        reserve_guest_ai_request(
+            principal.guest_session_hash,
+            hash_client_ip(http_request),
+            datetime.now(timezone.utc),
+        )
+    except GuestQuotaExceeded as error:
+        retry_seconds = max(
+            1,
+            int(
+                (
+                    error.retry_at.astimezone(timezone.utc)
+                    - datetime.now(timezone.utc)
+                ).total_seconds()
+            ),
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="访客 AI 请求额度已达上限，请在额度恢复后重试",
+            headers={
+                "Retry-After": str(retry_seconds),
+                "X-Quota-Reset": error.retry_at.isoformat(),
+            },
+        ) from error
+
+
 @app.post("/api/agent/chat")
 def agent_chat(
     request: ChatRequest,
@@ -361,44 +374,130 @@ def agent_chat_stream(
     http_request: Request,
     principal: Principal = Depends(get_current_principal),
 ):
-    """以 SSE 返回状态、回答片段和最终完整结果。"""
-    events: queue.Queue[tuple[str, dict] | None] = queue.Queue()
+    """创建可暂停的 Run，并以 SSE 返回状态、片段和工作轨迹。"""
+    task, worker_factory = _prepare_agent_run(request, principal, http_request)
+    events = agent_run_manager.start(
+        task["run_id"], principal.owner_id, worker_factory
+    )
+    return _run_event_response(events)
 
-    def emit(event: str, data: dict) -> None:
-        events.put((event, data))
 
-    def run_chat() -> None:
-        try:
-            emit("status", {"stage": "processing"})
-            payload = _chat(
-                request,
-                principal,
-                http_request,
-                on_token=lambda token: emit("token", {"content": token}),
+def _prepare_agent_run(request: ChatRequest, principal: Principal, http_request: Request):
+    """校验并创建 queued Run；这里只预占一次访客额度。"""
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="消息不能为空")
+    _validate_knowledge_access(request, principal)
+    _reserve_guest_quota(principal, http_request)
+    try:
+        conversation_id = conversation_service.resolve_conversation(
+            request.conversation_id, owner_id=principal.owner_id
+        )
+        task = repository.create_agent_task(
+            conversation_id,
+            principal.owner_id,
+            None,
+            quota_reserved=principal.role == "guest",
+        )
+    except ConversationNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    def worker_factory(control, emit):
+        def checkpoint_callback(state):
+            repository.update_agent_task(
+                task["run_id"],
+                principal.owner_id,
+                expected_statuses={"running", "pause_requested"},
+                checkpoint=serialize_agent_state(state),
             )
-            emit("done", payload)
-        except HTTPException as error:
+            retrieval_debug = state.get("retrieval_debug") or {}
+            safe_rag = {
+                key: retrieval_debug[key]
+                for key in ("top_k", "max_distance", "returned", "matches")
+                if key in retrieval_debug
+            }
             emit(
-                "error",
+                "trace",
                 {
-                    "status": error.status_code,
-                    "detail": str(error.detail),
+                    "trace": {
+                        "steps": state.get("steps", 0),
+                        "tools": state.get("tool_traces", []),
+                        "rag": safe_rag,
+                    }
                 },
             )
-        except Exception:
-            # 不把模型供应商或内部堆栈暴露到浏览器。
-            emit(
-                "error",
-                {
-                    "status": 500,
-                    "detail": "Agent 执行失败，请检查模型、工具参数和后端日志",
-                },
+
+        def status_callback(status: str):
+            if status == "paused":
+                repository.update_agent_task(
+                    task["run_id"],
+                    principal.owner_id,
+                    expected_statuses={"running", "pause_requested"},
+                    status="paused",
+                )
+                emit("paused", {"status": "paused"})
+            else:
+                emit("status", {"status": status})
+
+        turn = conversation_service.run_resumable_task(
+            run_id=task["run_id"],
+            message=message,
+            knowledge_base_id=request.knowledge_base_id,
+            conversation_id=task["conversation_id"],
+            owner_id=principal.owner_id,
+            allowed_tools=(
+                GUEST_ALLOWED_TOOLS if principal.role == "guest" else None
+            ),
+            control=control,
+            checkpoint_callback=checkpoint_callback,
+            status_callback=status_callback,
+            on_token=lambda token: emit("token", {"content": token}),
+        )
+        result = turn.agent
+        if result.status == "completed":
+            repository.update_agent_task(
+                task["run_id"],
+                principal.owner_id,
+                expected_statuses={"running"},
+                status="completed",
             )
-        finally:
-            events.put(None)
+            emit("trace", {"trace": turn.trace.to_dict()})
+            emit("done", _turn_payload(task["run_id"], turn))
+        elif result.status == "paused":
+            # paused 事件已由 status_callback 发出，等待 resume 继续订阅。
+            pass
+        elif result.status == "stopped":
+            emit("cancelled", {"status": "stopped", "detail": "任务已停止"})
+        elif result.status == "timed_out":
+            emit("timeout", {"status": "timed_out", "detail": "任务执行超时，请重试"})
+        else:
+            emit("error", {"status": 500, "code": "agent_failed", "detail": "Agent 执行失败，请检查后端日志"})
 
-    threading.Thread(target=run_chat, daemon=True).start()
+    return task, worker_factory
 
+
+def _turn_payload(run_id: str, turn) -> dict:
+    result = turn.agent
+    return {
+        "run_id": run_id,
+        "conversation_id": turn.conversation_id,
+        "history_messages": turn.history_messages,
+        "trace": turn.trace.to_dict(),
+        "answer": result.answer,
+        "matched_chunks": result.matched_chunks,
+        "llm_called": result.llm_called,
+        "agent": {
+            "tool_called": result.tool_called,
+            "tool_name": result.tool_name,
+            "steps": result.steps,
+            "tools_used": result.tools_used,
+            "tool_source": result.tool_source,
+            "mcp_server": result.mcp_server,
+        },
+    }
+
+
+def _run_event_response(events):
     def event_stream():
         while True:
             item = events.get()
@@ -411,11 +510,97 @@ def agent_chat_stream(
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-store",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _public_task(task: dict) -> dict:
+    """不向浏览器返回检查点正文，只返回可操作的生命周期信息。"""
+    return {
+        key: task.get(key)
+        for key in (
+            "run_id",
+            "conversation_id",
+            "owner_id",
+            "status",
+            "answer_prefix",
+            "error_code",
+            "error_message",
+            "quota_reserved",
+            "created_at",
+            "updated_at",
+            "started_at",
+            "finished_at",
+        )
+    }
+
+
+@app.post("/api/agent/runs/{run_id}/pause")
+def pause_agent_run(
+    run_id: str,
+    principal: Principal = Depends(get_current_principal),
+):
+    try:
+        return _public_task(agent_run_manager.request_pause(run_id, principal.owner_id))
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/agent/runs/{run_id}/resume")
+def resume_agent_run(
+    run_id: str,
+    principal: Principal = Depends(get_current_principal),
+):
+    try:
+        return _run_event_response(
+            agent_run_manager.resume(run_id, principal.owner_id)
+        )
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail="任务不存在或恢复信息已过期") from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/api/agent/runs/{run_id}/cancel")
+def cancel_agent_run(
+    run_id: str,
+    principal: Principal = Depends(get_current_principal),
+):
+    try:
+        return _public_task(agent_run_manager.cancel(run_id, principal.owner_id))
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail="任务不存在") from error
+
+
+@app.get("/api/agent/runs/{run_id}")
+def get_agent_run(
+    run_id: str,
+    principal: Principal = Depends(get_current_principal),
+):
+    task = repository.get_agent_task(run_id, principal.owner_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return _public_task(task)
+
+
+@app.get("/api/agent/runs")
+def list_agent_runs(
+    conversation_id: str | None = Query(default=None),
+    principal: Principal = Depends(get_current_principal),
+):
+    return {
+        "runs": [
+            _public_task(task)
+            for task in repository.list_agent_tasks(
+                conversation_id, owner_id=principal.owner_id
+            )
+        ]
+    }
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

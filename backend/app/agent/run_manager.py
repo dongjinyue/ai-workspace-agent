@@ -1,0 +1,215 @@
+"""Agent Run（执行任务）的线程编排、事件广播和控制入口。"""
+
+import os
+import queue
+import threading
+from dataclasses import dataclass
+from typing import Callable
+
+from app.agent.runner import RunControl
+from app.memory import repository
+
+
+EventQueue = queue.Queue[tuple[str, dict] | None]
+WorkerFactory = Callable[[RunControl, Callable[[str, dict], None]], None]
+
+
+@dataclass
+class _RunSession:
+    run_id: str
+    owner_id: str
+    control: RunControl
+    events: EventQueue
+    worker_factory: WorkerFactory
+    thread: threading.Thread | None = None
+
+
+class RunManager:
+    """在进程内管理活动执行；持久化状态仍以 SQLite 任务表为准。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._sessions: dict[str, _RunSession] = {}
+
+    def _timeout_seconds(self) -> float:
+        raw = os.getenv("AGENT_RUN_TIMEOUT_SECONDS", os.getenv("MODEL_TIMEOUT_SECONDS", "120"))
+        try:
+            return max(1.0, float(raw))
+        except ValueError:
+            return 120.0
+
+    def _emit(self, session: _RunSession, event: str, data: dict) -> None:
+        payload = {"run_id": session.run_id, **data}
+        session.events.put((event, payload))
+
+    def _start_session(
+        self,
+        run_id: str,
+        owner_id: str,
+        worker_factory: WorkerFactory,
+        *,
+        status: str,
+    ) -> EventQueue:
+        task = repository.get_agent_task(run_id, owner_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        control = RunControl(self._timeout_seconds())
+        session = _RunSession(
+            run_id=run_id,
+            owner_id=owner_id,
+            control=control,
+            events=queue.Queue(),
+            worker_factory=worker_factory,
+        )
+        with self._lock:
+            self._sessions[run_id] = session
+        self._emit(
+            session,
+            "run",
+            {
+                "conversation_id": task["conversation_id"],
+                "status": status,
+            },
+        )
+        self._emit(session, "status", {"status": status})
+        thread = threading.Thread(
+            target=self._run_worker,
+            args=(session,),
+            name=f"agent-run-{run_id[:8]}",
+            daemon=True,
+        )
+        session.thread = thread
+        thread.start()
+        return session.events
+
+    def start(
+        self,
+        run_id: str,
+        owner_id: str,
+        worker_factory: WorkerFactory,
+    ) -> EventQueue:
+        """启动 queued Run；新 Run 的额度由调用方在创建前预占。"""
+        task = repository.get_agent_task(run_id, owner_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        if task["status"] != "queued":
+            raise ValueError("只有 queued 任务可以启动")
+        repository.update_agent_task(
+            run_id,
+            owner_id,
+            expected_statuses={"queued"},
+            status="running",
+        )
+        return self._start_session(
+            run_id, owner_id, worker_factory, status="running"
+        )
+
+    def _run_worker(self, session: _RunSession) -> None:
+        try:
+            session.worker_factory(
+                session.control,
+                lambda event, data: self._emit(session, event, data),
+            )
+        except Exception:
+            # 工作线程只向浏览器发送稳定错误码，详细异常留在调用方日志。
+            repository.update_agent_task(
+                session.run_id,
+                session.owner_id,
+                expected_statuses={"running", "pause_requested"},
+                status="failed",
+                error_code="agent_failed",
+                error_message="Agent 执行失败，请检查后端日志",
+            )
+            self._emit(
+                session,
+                "error",
+                {"status": 500, "code": "agent_failed", "detail": "Agent 执行失败，请检查后端日志"},
+            )
+            self._emit(session, "status", {"status": "failed"})
+        finally:
+            session.events.put(None)
+
+    def request_pause(self, run_id: str, owner_id: str) -> dict:
+        task = repository.get_agent_task(run_id, owner_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        if task["status"] in {"queued", "running"}:
+            if repository.update_agent_task(
+                run_id,
+                owner_id,
+                expected_statuses={task["status"]},
+                status="pause_requested",
+            ):
+                with self._lock:
+                    session = self._sessions.get(run_id)
+                if session:
+                    session.control.request_pause()
+                if session:
+                    self._emit(session, "status", {"status": "pause_requested"})
+            return repository.get_agent_task(run_id, owner_id) or task
+        if task["status"] == "paused":
+            return task
+        raise ValueError("当前任务不能暂停")
+
+    def resume(
+        self,
+        run_id: str,
+        owner_id: str,
+        worker_factory: WorkerFactory | None = None,
+    ) -> EventQueue:
+        task = repository.get_agent_task(run_id, owner_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        if task["status"] != "paused":
+            raise ValueError("只有 paused 任务可以恢复")
+        with self._lock:
+            session = self._sessions.get(run_id)
+            factory = worker_factory or (session.worker_factory if session else None)
+        if factory is None:
+            raise LookupError("任务恢复信息已过期，请重新提问")
+        if not repository.update_agent_task(
+            run_id,
+            owner_id,
+            expected_statuses={"paused"},
+            status="running",
+        ):
+            raise ValueError("任务状态已改变，请刷新后重试")
+        return self._start_session(run_id, owner_id, factory, status="running")
+
+    def cancel(self, run_id: str, owner_id: str) -> dict:
+        task = repository.get_agent_task(run_id, owner_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        if task["status"] in {"completed", "stopped", "timed_out", "failed"}:
+            return task
+        with self._lock:
+            session = self._sessions.get(run_id)
+        if session:
+            session.control.cancel()
+            self._emit(session, "cancelled", {"status": "stopped"})
+        repository.update_agent_task(
+            run_id,
+            owner_id,
+            expected_statuses={task["status"]},
+            status="stopped",
+            error_code="cancelled",
+            error_message="任务已停止",
+        )
+        if session and task["status"] != "running":
+            session.events.put(None)
+        return repository.get_agent_task(run_id, owner_id) or task
+
+    def get_events(self, run_id: str, owner_id: str) -> EventQueue:
+        with self._lock:
+            session = self._sessions.get(run_id)
+        if session is None or session.owner_id != owner_id:
+            raise LookupError("任务不存在")
+        return session.events
+
+    def reset(self) -> None:
+        """测试和进程关闭时释放内存中的订阅，不删除持久化任务。"""
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for session in sessions:
+            session.control.cancel()

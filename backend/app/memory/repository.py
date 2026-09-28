@@ -21,7 +21,9 @@ TERMINAL_TASK_STATUSES = frozenset(
     {"completed", "stopped", "timed_out", "failed"}
 )
 TASK_TRANSITIONS: dict[str, frozenset[str]] = {
-    "queued": frozenset({"running", "stopped", "timed_out", "failed"}),
+    "queued": frozenset(
+        {"running", "pause_requested", "stopped", "timed_out", "failed"}
+    ),
     "running": frozenset(
         {"pause_requested", "completed", "stopped", "timed_out", "failed"}
     ),
@@ -61,7 +63,7 @@ def _checkpoint_json(checkpoint: dict | str | None) -> str | None:
 def create_agent_task(
     conversation_id: str,
     owner_id: str,
-    user_message_id: int,
+    user_message_id: int | None,
     *,
     run_id: str | None = None,
     status: str = "queued",
@@ -90,9 +92,11 @@ def create_agent_task(
             WHERE EXISTS (
                 SELECT 1 FROM conversations
                 WHERE id = ? AND owner_id = ?
-            ) AND EXISTS (
+            ) AND (
+                ? IS NULL OR EXISTS (
                 SELECT 1 FROM messages
                 WHERE id = ? AND conversation_id = ?
+                )
             )
             """,
             (
@@ -108,6 +112,7 @@ def create_agent_task(
                 now,
                 conversation_id,
                 owner_id,
+                user_message_id,
                 user_message_id,
                 conversation_id,
             ),
@@ -175,6 +180,7 @@ def update_agent_task(
     answer_prefix: str | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    user_message_id: int | None = None,
 ) -> bool:
     """带期望状态条件更新任务，避免暂停和完成并发时互相覆盖。"""
     expected = set(expected_statuses)
@@ -209,6 +215,9 @@ def update_agent_task(
     if error_message is not None:
         assignments.append("error_message = ?")
         values.append(error_message)
+    if user_message_id is not None:
+        assignments.append("user_message_id = ?")
+        values.append(user_message_id)
 
     placeholders = ", ".join("?" for _ in expected)
     values.extend([run_id, owner_id, *expected])
