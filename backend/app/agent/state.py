@@ -16,6 +16,7 @@ class AgentState(TypedDict):
     tool_traces: list[dict[str, Any]]
     llm_calls: int
     llm_duration_ms: float
+    retrieval_debug: NotRequired[dict[str, Any]]
     allowed_tools: NotRequired[frozenset[str] | None]
     # 最近安全边界之后要进入的节点；检查点恢复时由执行器使用。
     next_node: NotRequired[str | None]

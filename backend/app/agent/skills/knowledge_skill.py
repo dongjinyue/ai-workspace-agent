@@ -1,7 +1,8 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agent.skill import Skill, ToolDefinition
-from app.rag.service import semantic_search
+from app.configuration import get_rag_top_k
+from app.rag.service import get_rag_max_distance, semantic_search
 
 
 class KnowledgeSearchArguments(BaseModel):
@@ -30,13 +31,30 @@ def get_knowledge_base_info(knowledge_base_id: str | None) -> dict:
 
 def knowledge_search(knowledge_base_id: str | None, query: str) -> dict:
     """检索当前后端上下文指定的知识库，不接受模型提供知识库 ID。"""
+    top_k = get_rag_top_k()
+    retrieval_debug = {
+        "top_k": top_k,
+        "max_distance": get_rag_max_distance(),
+        "returned": 0,
+        "matches": [],
+    }
     if not knowledge_base_id:
-        return {"matched": False, "chunks": []}
+        return {"matched": False, "chunks": [], "retrieval_debug": retrieval_debug}
     matches = semantic_search(knowledge_base_id, query)
+    retrieval_debug["returned"] = len(matches)
+    retrieval_debug["matches"] = [
+        {
+            "rank": rank,
+            "similarity": round(match.similarity, 4),
+            "distance": round(match.distance, 4),
+        }
+        for rank, match in enumerate(matches, start=1)
+    ]
     return {
         "matched": bool(matches),
         "chunks": [match.document for match in matches],
         "similarities": [round(match.similarity, 4) for match in matches],
+        "retrieval_debug": retrieval_debug,
     }
 
 

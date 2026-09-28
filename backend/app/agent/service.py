@@ -43,6 +43,7 @@ class AgentResult:
     llm_called: bool = True
     # 可暂停执行器使用；普通同步调用始终为 completed。
     status: str = "completed"
+    retrieval_debug: dict[str, Any] | None = None
 
 
 def execute_tool(
@@ -184,6 +185,7 @@ def run_agent(
             "tool_traces": [],
             "llm_calls": 0,
             "llm_duration_ms": 0.0,
+            "retrieval_debug": {},
             "allowed_tools": allowed_tools,
             "stream_callback": on_token,
         }
@@ -213,6 +215,7 @@ def run_agent(
         tool_traces=result.get("tool_traces", []),
         llm_calls=result.get("llm_calls", 0),
         llm_duration_ms=result.get("llm_duration_ms", 0.0),
+        retrieval_debug=result.get("retrieval_debug", {}),
         tool_source=last_registration.source if last_registration else None,
         mcp_server=(
             last_registration.server

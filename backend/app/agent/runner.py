@@ -70,6 +70,7 @@ def _result_from_state(state: AgentState, status: str):
         tool_traces=state.get("tool_traces", []),
         llm_calls=state.get("llm_calls", 0),
         llm_duration_ms=state.get("llm_duration_ms", 0.0),
+        retrieval_debug=state.get("retrieval_debug", {}),
         tool_source=last_registration.source if last_registration else None,
         mcp_server=(
             last_registration.server

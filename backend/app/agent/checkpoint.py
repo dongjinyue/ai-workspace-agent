@@ -25,6 +25,7 @@ _STATE_FIELDS = frozenset(
         "tool_traces",
         "llm_calls",
         "llm_duration_ms",
+        "retrieval_debug",
         "allowed_tools",
     }
 )
@@ -120,6 +121,7 @@ def deserialize_agent_state(raw: str) -> AgentState:
     decoded.setdefault("steps", 0)
     decoded.setdefault("llm_calls", 0)
     decoded.setdefault("llm_duration_ms", 0.0)
+    decoded.setdefault("retrieval_debug", {})
     return decoded
 
 

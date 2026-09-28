@@ -335,6 +335,9 @@ def tool_node(state: AgentState) -> dict[str, Any]:
         "tools_used": [*state["tools_used"], tool_name],
         "matched_chunks": matched_chunks,
         "retrieved_chunks": result.get("chunks", []),
+        "retrieval_debug": result.get(
+            "retrieval_debug", state.get("retrieval_debug", {})
+        ),
         "final_answer": final_answer,
         "tool_traces": [*state.get("tool_traces", []), tool_trace],
     }

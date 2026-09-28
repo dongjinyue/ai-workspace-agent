@@ -1,6 +1,7 @@
 import os
 import re
 
+from app.configuration import get_rag_top_k
 from app.rag.embeddings import embed_texts
 from app.rag.vector_store import SearchMatch, add_chunks, find_collection, search_chunks
 from app.security import PromptInjectionError, contains_prompt_injection
@@ -95,9 +96,12 @@ def semantic_search(
     knowledge_base_id: str,
     query: str,
     *,
-    top_k: int = 5,
+    top_k: int | None = None,
 ) -> list[SearchMatch]:
     """向量化用户问题，并过滤超过距离阈值的不可信结果。"""
+    actual_top_k = get_rag_top_k() if top_k is None else top_k
+    if not 1 <= actual_top_k <= 20:
+        raise ValueError("top_k 必须是 1 到 20 之间的整数")
     if not query.strip() or find_collection(knowledge_base_id) is None:
         return []
 
@@ -106,7 +110,12 @@ def semantic_search(
     return search_chunks(
         knowledge_base_id,
         query_embedding,
-        top_k=top_k,
+        top_k=actual_top_k,
         max_distance=max_distance,
         query_text=query,
     )
+
+
+def get_rag_max_distance() -> float:
+    """返回当前 RAG 距离阈值，供安全调试轨迹记录实际配置。"""
+    return float(os.getenv("RAG_MAX_COSINE_DISTANCE", "0.45"))

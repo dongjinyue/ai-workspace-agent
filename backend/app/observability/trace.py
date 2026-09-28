@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -13,7 +14,7 @@ class RequestTrace:
     steps: int
     skill: str | None
     tools: list[dict]
-    rag: dict[str, bool | int]
+    rag: dict[str, Any]
     llm_calls: int
     llm_duration_ms: float
 

@@ -10,6 +10,18 @@ class ConfigurationError(RuntimeError):
     """配置缺失或不安全；错误信息只列配置名称，不回显配置值。"""
 
 
+def get_rag_top_k() -> int:
+    """读取 RAG（检索增强生成）返回数量，并限制调试和资源消耗范围。"""
+    raw_value = os.getenv("RAG_TOP_K", "5").strip()
+    try:
+        top_k = int(raw_value)
+    except ValueError as error:
+        raise ConfigurationError("RAG_TOP_K 必须是 1 到 20 之间的整数") from error
+    if not 1 <= top_k <= 20:
+        raise ConfigurationError("RAG_TOP_K 必须是 1 到 20 之间的整数")
+    return top_k
+
+
 def validate_runtime_configuration() -> None:
     """生产模式要求认证、独立 HMAC 密钥、可信代理和 HTTPS 来源。"""
     environment = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "")).strip().lower()

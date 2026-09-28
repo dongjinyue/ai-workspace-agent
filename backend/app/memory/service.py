@@ -140,6 +140,15 @@ class ConversationService:
 
             duration_ms = round((perf_counter() - request_started) * 1000, 3)
             # 只组装可安全公开的执行元数据，不包含模型内部思维过程。
+            rag_trace: dict = {
+                "hit": agent_result.matched_chunks > 0,
+                "results": agent_result.matched_chunks,
+            }
+            retrieval_debug = agent_result.retrieval_debug or {}
+            for key in ("top_k", "max_distance", "returned", "matches"):
+                if key in retrieval_debug:
+                    rag_trace[key] = retrieval_debug[key]
+
             trace = RequestTrace(
                 request_id=request_id,
                 started_at=started_at,
@@ -148,10 +157,7 @@ class ConversationService:
                 steps=agent_result.steps,
                 skill=agent_result.active_skill,
                 tools=agent_result.tool_traces or [],
-                rag={
-                    "hit": agent_result.matched_chunks > 0,
-                    "results": agent_result.matched_chunks,
-                },
+                rag=rag_trace,
                 llm_calls=agent_result.llm_calls,
                 llm_duration_ms=agent_result.llm_duration_ms,
             )
