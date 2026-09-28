@@ -164,7 +164,11 @@ def _stream_text_response(client, request: dict[str, Any], on_token) -> str:
     response = client.chat.completions.create(**request, stream=True)
     parts: list[str] = []
     for chunk in response:
-        delta = chunk.choices[0].delta
+        # 部分兼容 OpenAI 接口的模型会发送空 choices 数据块（例如结束或用量信息），需要跳过。
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        delta = choices[0].delta
         content = getattr(delta, "content", None)
         if content:
             parts.append(content)
