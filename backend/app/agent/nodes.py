@@ -4,7 +4,12 @@ import re
 from time import perf_counter
 from typing import Any
 
-from app.agent.llm import create_llm_client, model_name, translate_model_error
+from app.agent.llm import (
+    create_llm_client,
+    model_name,
+    model_request_options,
+    translate_model_error,
+)
 from app.agent.state import AgentState
 from app.agent.service import get_agent_tool_schemas
 from app.skills.registry import get_skill
@@ -201,7 +206,7 @@ def agent_node(state: AgentState) -> dict[str, Any]:
                 else "auto"
             ),
             parallel_tool_calls=False,
-            extra_body={"enable_thinking": False},
+            **model_request_options(),
         )
     except Exception as error:
         logger.error("LLM call failed error_type=%s", type(error).__name__)
