@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app.agent.nodes import NO_KNOWLEDGE_ANSWER
 from app.agent.service import run_agent
 
 
@@ -96,3 +97,57 @@ def test_invalid_tool_arguments_are_safely_returned_to_model():
 
     assert result.answer == "这个表达式无法安全计算。"
     assert result.tool_name == "calculator"
+
+
+def test_knowledge_search_miss_stops_before_second_model_call():
+    class KnowledgeMissLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if kwargs["tool_choice"] == {
+                "type": "function",
+                "function": {"name": "search_knowledge_base"},
+            }:
+                tool_call = SimpleNamespace(
+                    id="knowledge-call",
+                    function=SimpleNamespace(
+                        name="search_knowledge_base",
+                        arguments='{"query":"rag是什么"}',
+                    ),
+                )
+                message = SimpleNamespace(content=None, tool_calls=[tool_call])
+            else:
+                message = SimpleNamespace(content="模型绕过了知识库", tool_calls=None)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    completions = KnowledgeMissLLM()
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=completions)
+    )
+    search_schema = {
+        "type": "function",
+        "function": {
+            "name": "search_knowledge_base",
+            "description": "搜索知识库",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    }
+    with (
+        patch("app.agent.nodes._client", return_value=fake_client),
+        patch("app.agent.nodes.get_agent_tool_schemas", return_value=[search_schema]),
+        patch(
+            "app.agent.service.execute_tool",
+            return_value={"matched": False, "chunks": []},
+        ),
+    ):
+        result = run_agent("rag是什么", "trusted-kb")
+
+    assert result.answer == NO_KNOWLEDGE_ANSWER
+    assert result.tools_used == ["search_knowledge_base"]
+    assert completions.calls == 1

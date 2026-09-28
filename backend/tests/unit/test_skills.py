@@ -75,6 +75,52 @@ def test_explicit_knowledge_question_forces_search_tool():
     assert select_required_tool(state, schemas) == "search_knowledge_base"
 
 
+def test_rag_concept_question_forces_search_when_knowledge_base_is_selected():
+    state = _state(None)
+    state["messages"] = [{"role": "user", "content": "rag是什么"}]
+    schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
+
+    assert select_required_tool(state, schemas) == "search_knowledge_base"
+
+
+def test_document_source_question_forces_search_when_knowledge_base_is_selected():
+    state = _state(None)
+    state["messages"] = [
+        {
+            "role": "user",
+            "content": "这个回答是基于鸿维-10-RAG.pdf吗？",
+        }
+    ]
+    schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
+
+    assert select_required_tool(state, schemas) == "search_knowledge_base"
+
+
+def test_substantive_question_defaults_to_search_when_knowledge_base_is_selected():
+    state = _state(None)
+    state["messages"] = [{"role": "user", "content": "请介绍这份资料的核心内容"}]
+    schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
+
+    assert select_required_tool(state, schemas) == "search_knowledge_base"
+
+
+def test_selected_knowledge_base_keeps_greetings_on_auto_routing():
+    state = _state(None)
+    state["messages"] = [{"role": "user", "content": "你好"}]
+    schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
+
+    assert select_required_tool(state, schemas) is None
+
+
+def test_without_knowledge_base_does_not_force_search():
+    state = _state(None)
+    state["knowledge_base_id"] = None
+    state["messages"] = [{"role": "user", "content": "请介绍这份资料的核心内容"}]
+    schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
+
+    assert select_required_tool(state, schemas) is None
+
+
 def test_document_count_question_forces_info_tool():
     state = _state(None)
     state["messages"] = [{"role": "user", "content": "知识库有多少文档"}]

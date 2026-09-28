@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from time import perf_counter
 from typing import Any
 
@@ -24,6 +25,60 @@ KNOWLEDGE_INFO_KEYWORDS = (
     "多少文档", "多少文件", "几篇文档", "几份文档", "有哪些文档",
     "哪些文档", "文档列表", "文件列表", "文档名称",
 )
+GREETING_MESSAGES = frozenset(
+    {
+        "你好",
+        "您好",
+        "嗨",
+        "hello",
+        "hi",
+        "早上好",
+        "下午好",
+        "晚上好",
+        "谢谢",
+        "感谢",
+        "再见",
+        "拜拜",
+    }
+)
+CALCULATOR_KEYWORDS = (
+    "计算",
+    "加法",
+    "减法",
+    "乘法",
+    "除法",
+    "相加",
+    "相减",
+    "相乘",
+    "相除",
+    "等于多少",
+)
+TIME_KEYWORDS = (
+    "现在几点",
+    "当前时间",
+    "现在时间",
+    "当前日期",
+    "今天几号",
+)
+TEXT_STATS_KEYWORDS = (
+    "字符数",
+    "多少字符",
+    "字数",
+    "多少行",
+    "行数",
+    "几行",
+)
+
+
+def _is_greeting(message: str) -> bool:
+    """只把明确的寒暄交给模型，避免知识库默认路由干扰自然对话。"""
+    normalized = message.strip().lower()
+    return normalized in GREETING_MESSAGES
+
+
+def _has_arithmetic_expression(message: str) -> bool:
+    """识别简单数字表达式，保证选择知识库时计算问题仍交给计算器。"""
+    return bool(re.search(r"\d+(?:\.\d+)?\s*[+\-*/×÷]\s*\d+", message))
 
 
 def select_required_tool(state: AgentState, available_tools: list[dict]) -> str | None:
@@ -47,8 +102,28 @@ def select_required_tool(state: AgentState, available_tools: list[dict]) -> str 
             if "get_knowledge_base_info" in available_names
             else None
         )
-    if state.get("active_skill") or any(
-        keyword in last_user_message for keyword in KNOWLEDGE_INTENT_KEYWORDS
+
+    # 已选择知识库时，只有明确的寒暄和专用工具问题可以跳过 RAG；
+    # 其余实质性问题默认检索，避免模型用通用知识冒充文档依据。
+    if _is_greeting(last_user_message):
+        return None
+    if "calculator" in available_names and (
+        _has_arithmetic_expression(last_user_message)
+        or any(keyword in last_user_message for keyword in CALCULATOR_KEYWORDS)
+    ):
+        return "calculator"
+    if "get_current_time" in available_names and any(
+        keyword in last_user_message for keyword in TIME_KEYWORDS
+    ):
+        return "get_current_time"
+    if "calculate_text_stats" in available_names and any(
+        keyword in last_user_message for keyword in TEXT_STATS_KEYWORDS
+    ):
+        return "calculate_text_stats"
+    if "search_knowledge_base" in available_names and (
+        state.get("active_skill")
+        or any(keyword in last_user_message for keyword in KNOWLEDGE_INTENT_KEYWORDS)
+        or last_user_message.strip()
     ):
         return (
             "search_knowledge_base"
