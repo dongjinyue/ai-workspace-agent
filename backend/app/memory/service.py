@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
+from typing import Callable
 from uuid import uuid4
 
 from app.agent.service import AgentResult, run_agent
@@ -91,6 +92,7 @@ class ConversationService:
         conversation_id: str | None,
         owner_id: str,
         allowed_tools: frozenset[str] | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> ConversationTurnResult:
         # 同一 Conversation（会话）可有多次请求，每次必须有独立 request_id。
         request_id = uuid4().hex
@@ -122,6 +124,7 @@ class ConversationService:
                     conversation_id=resolved_id,
                     history_messages=public_history,
                     allowed_tools=allowed_tools,
+                    on_token=on_token,
                 )
             except Exception as error:
                 # 未完成轮次不应污染后续上下文；只回滚本次用户消息。

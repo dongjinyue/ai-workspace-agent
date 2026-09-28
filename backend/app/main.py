@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 import os
+import queue
 import re
+import threading
 from pathlib import Path
 from uuid import uuid4
 
@@ -28,7 +30,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from app.auth import AuthenticationError, Principal, resolve_principal
 from app.agent.service import GUEST_ALLOWED_TOOLS
@@ -68,6 +70,7 @@ from app.security import (
     InMemoryRateLimiter,
     PromptInjectionError,
 )
+from app.streaming import format_sse
 
 configure_logging()
 app = FastAPI()
@@ -252,7 +255,13 @@ def chat(
     return _chat(request, principal, http_request)
 
 
-def _chat(request: ChatRequest, principal: Principal, http_request: Request):
+def _chat(
+    request: ChatRequest,
+    principal: Principal,
+    http_request: Request,
+    *,
+    on_token=None,
+):
     message = request.message.strip()
 
     if not message:
@@ -304,6 +313,7 @@ def _chat(request: ChatRequest, principal: Principal, http_request: Request):
             allowed_tools=(
                 GUEST_ALLOWED_TOOLS if principal.role == "guest" else None
             ),
+            on_token=on_token,
         )
         result = turn.agent
         return {
@@ -343,6 +353,69 @@ def agent_chat(
 ):
     """Agent 模式允许模型自主选择经过注册和校验的工具。"""
     return _chat(request, principal, http_request)
+
+
+@app.post("/api/agent/chat/stream")
+def agent_chat_stream(
+    request: ChatRequest,
+    http_request: Request,
+    principal: Principal = Depends(get_current_principal),
+):
+    """以 SSE 返回状态、回答片段和最终完整结果。"""
+    events: queue.Queue[tuple[str, dict] | None] = queue.Queue()
+
+    def emit(event: str, data: dict) -> None:
+        events.put((event, data))
+
+    def run_chat() -> None:
+        try:
+            emit("status", {"stage": "processing"})
+            payload = _chat(
+                request,
+                principal,
+                http_request,
+                on_token=lambda token: emit("token", {"content": token}),
+            )
+            emit("done", payload)
+        except HTTPException as error:
+            emit(
+                "error",
+                {
+                    "status": error.status_code,
+                    "detail": str(error.detail),
+                },
+            )
+        except Exception:
+            # 不把模型供应商或内部堆栈暴露到浏览器。
+            emit(
+                "error",
+                {
+                    "status": 500,
+                    "detail": "Agent 执行失败，请检查模型、工具参数和后端日志",
+                },
+            )
+        finally:
+            events.put(None)
+
+    threading.Thread(target=run_chat, daemon=True).start()
+
+    def event_stream():
+        while True:
+            item = events.get()
+            if item is None:
+                break
+            event, data = item
+            yield format_sse(event, data)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/conversations/{conversation_id}/messages")

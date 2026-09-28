@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 
 from jsonschema import ValidationError, validate
 from app.agent.registry import (
@@ -158,6 +158,7 @@ def run_agent(
     conversation_id: str | None = None,
     history_messages: list[dict[str, str]] | None = None,
     allowed_tools: frozenset[str] | None = None,
+    on_token: Callable[[str], None] | None = None,
 ) -> AgentResult:
     """从 START 开始调用已编译的 LangGraph 工作流。"""
     from app.agent.graph import agent_graph
@@ -182,6 +183,7 @@ def run_agent(
             "llm_calls": 0,
             "llm_duration_ms": 0.0,
             "allowed_tools": allowed_tools,
+            "stream_callback": on_token,
         }
     )
     answer = result.get("final_answer") or _message_content(result["messages"][-1])

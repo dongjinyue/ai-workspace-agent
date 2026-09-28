@@ -4,6 +4,8 @@ import re
 from time import perf_counter
 from typing import Any
 
+from openai.types.chat import ChatCompletionMessage
+
 from app.agent.llm import (
     create_llm_client,
     model_name,
@@ -157,6 +159,22 @@ def _client():
     return create_llm_client()
 
 
+def _stream_text_response(client, request: dict[str, Any], on_token) -> str:
+    """只流式传输最终文本；工具规划阶段仍使用完整响应，避免拆坏工具参数。"""
+    response = client.chat.completions.create(**request, stream=True)
+    parts: list[str] = []
+    for chunk in response:
+        delta = chunk.choices[0].delta
+        content = getattr(delta, "content", None)
+        if content:
+            parts.append(content)
+            on_token(content)
+    answer = "".join(parts)
+    if not answer:
+        raise RuntimeError("模型没有返回回答或工具调用")
+    return answer
+
+
 def agent_node(state: AgentState) -> dict[str, Any]:
     """调用模型，并把模型消息追加到共享状态。"""
     if state["steps"] >= MAX_STEPS:
@@ -190,14 +208,15 @@ def agent_node(state: AgentState) -> dict[str, Any]:
     llm_started = perf_counter()
     try:
         required_tool = select_required_tool(state, available_tools)
-        response = _client().chat.completions.create(
-            model=model_name(),
-            messages=[
+        client = _client()
+        request = {
+            "model": model_name(),
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 *state["messages"],
             ],
-            tools=available_tools,
-            tool_choice=(
+            "tools": available_tools,
+            "tool_choice": (
                 {
                     "type": "function",
                     "function": {"name": required_tool},
@@ -205,15 +224,26 @@ def agent_node(state: AgentState) -> dict[str, Any]:
                 if required_tool
                 else "auto"
             ),
-            parallel_tool_calls=False,
+            "parallel_tool_calls": False,
             **model_request_options(),
-        )
+        }
+        stream_callback = state.get("stream_callback")
+        if stream_callback and required_tool is None:
+            # 确定性路由已经处理了知识库、计算、时间和文本统计等工具问题。
+            # 这里关闭工具调用，只把最终回答按片段传给前端，避免把工具参数半成品展示给用户。
+            request["tools"] = []
+            request["tool_choice"] = "none"
+            answer = _stream_text_response(client, request, stream_callback)
+            message = ChatCompletionMessage(role="assistant", content=answer)
+            response = None
+        else:
+            response = client.chat.completions.create(**request)
+            message = response.choices[0].message
     except Exception as error:
         logger.error("LLM call failed error_type=%s", type(error).__name__)
         translate_model_error(error)
         raise
     llm_duration_ms = (perf_counter() - llm_started) * 1000
-    message = response.choices[0].message
     if not message.content and not message.tool_calls:
         raise RuntimeError("模型没有返回回答或工具调用")
 

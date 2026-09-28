@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getAccessToken, isSupabaseConfigured, signInAdmin, signOutAdmin } from "./auth.js";
 import { formatQuotaStatus } from "./usage.js";
+import { createSseParser } from "./streaming.js";
 import "./App.css";
 import "./AgentStatus.css";
 import "./ExecutionTrace.css";
@@ -23,6 +24,42 @@ async function request(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+async function streamRequest(path, options, onEvent) {
+  const headers = new Headers(options.headers || {});
+  const token = await getAccessToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(`${API}${path}`, { ...options, headers, credentials: "include" });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    const error = new Error(data.detail || "请求失败，请稍后重试。");
+    error.status = response.status;
+    error.retryAfter = response.headers.get("Retry-After");
+    throw error;
+  }
+  if (!response.body) throw new Error("浏览器不支持流式响应，请刷新页面后重试。");
+
+  const parser = createSseParser((event) => {
+    if (event.event === "error") {
+      const error = new Error(event.data.detail || "Agent 执行失败，请稍后重试。");
+      error.status = event.data.status;
+      throw error;
+    }
+    onEvent(event);
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      parser.push(decoder.decode(value || new Uint8Array(), { stream: !done }));
+      if (done) break;
+    }
+    parser.finish();
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function formatTime(value) {
@@ -344,17 +381,31 @@ function App() {
     setQuestion("");
     setError("");
     setLoading(true);
-    setMessages((items) => [...items, { role: "user", content, created_at: new Date().toISOString() }]);
+    setMessages((items) => [...items,
+      { role: "user", content, created_at: new Date().toISOString() },
+      { role: "assistant", content: "", created_at: new Date().toISOString(), streaming: true },
+    ]);
     try {
-      const data = await request("/api/agent/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, conversation_id: conversationId || null, knowledge_base_id: knowledgeBaseId || null }) });
-      setConversationId(data.conversation_id);
-      localStorage.setItem(conversationStorageKey, data.conversation_id);
-      setMessages((items) => [...items, { role: "assistant", content: data.answer, created_at: data.trace?.completed_at, trace: data.trace }]);
-      await refresh(data.conversation_id);
+      let finalData = null;
+      let streamedAnswer = "";
+      await streamRequest("/api/agent/chat/stream", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, conversation_id: conversationId || null, knowledge_base_id: knowledgeBaseId || null }) }, (event) => {
+        if (event.event === "token") {
+          streamedAnswer += event.data.content || "";
+          setMessages((items) => items.map((item, index) => index === items.length - 1 ? { ...item, content: streamedAnswer, streaming: false } : item));
+        }
+        if (event.event === "done") {
+          finalData = event.data;
+          setConversationId(finalData.conversation_id);
+          localStorage.setItem(conversationStorageKey, finalData.conversation_id);
+          setMessages((items) => items.map((item, index) => index === items.length - 1 ? { ...item, content: finalData.answer, created_at: finalData.trace?.completed_at, trace: finalData.trace, streaming: false } : item));
+        }
+      });
+      if (!finalData) throw new Error("流式响应未正常结束，请重试。");
+      await refresh(finalData.conversation_id);
       const updatedSession = await request("/api/session");
       setSession(updatedSession);
     } catch (requestError) {
-      setMessages((items) => items.slice(0, -1));
+      setMessages((items) => items.slice(0, -2));
       setQuestion(content);
       if (requestError.status === 429) {
         try { setSession(await request("/api/session")); } catch { /* 保留原本的限额反馈 */ }
@@ -470,7 +521,7 @@ function App() {
         </div>}
         {messages.map((message, index) => <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
           {message.role === "assistant" && <div className="avatar ai" aria-hidden="true">AI</div>}
-          <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(message.trace?.completed_at || message.created_at)}{message.trace?.duration_ms != null ? ` · 用时 ${formatDuration(message.trace.duration_ms)}` : ""}</time></div>{message.role === "assistant" && <ExecutionTrace trace={message.trace} />}<div className="bubble">{message.content}</div></div>
+          <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(message.trace?.completed_at || message.created_at)}{message.trace?.duration_ms != null ? ` · 用时 ${formatDuration(message.trace.duration_ms)}` : ""}</time></div>{message.role === "assistant" && <ExecutionTrace trace={message.trace} />}{(!message.streaming || message.content) && <div className="bubble">{message.content}</div>}</div>
           {message.role === "user" && <div className="avatar user" aria-hidden="true">你</div>}
         </article>)}
         {loading && <article className="message assistant" aria-label="AI 正在生成回答"><div className="avatar ai" aria-hidden="true">AI</div><div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div></article>}

@@ -1,4 +1,4 @@
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Callable, NotRequired, TypedDict
 
 
 class AgentState(TypedDict):
@@ -17,3 +17,5 @@ class AgentState(TypedDict):
     llm_calls: int
     llm_duration_ms: float
     allowed_tools: NotRequired[frozenset[str] | None]
+    # 仅用于流式接口传递文本片段，不会写入会话或返回给模型。
+    stream_callback: NotRequired[Callable[[str], None] | None]
