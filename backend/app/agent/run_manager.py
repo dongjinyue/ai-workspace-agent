@@ -1,5 +1,6 @@
 """Agent Run（执行任务）的线程编排、事件广播和控制入口。"""
 
+import logging
 import os
 import queue
 import threading
@@ -10,6 +11,7 @@ from app.agent.runner import RunControl
 from app.memory import repository
 
 
+logger = logging.getLogger(__name__)
 EventQueue = queue.Queue[tuple[str, dict] | None]
 WorkerFactory = Callable[[RunControl, Callable[[str, dict], None]], None]
 
@@ -112,6 +114,7 @@ class RunManager:
             )
         except Exception:
             # 工作线程只向浏览器发送稳定错误码，详细异常留在调用方日志。
+            logger.exception("Agent run failed run_id=%s", session.run_id)
             repository.update_agent_task(
                 session.run_id,
                 session.owner_id,

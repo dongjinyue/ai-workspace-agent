@@ -522,10 +522,9 @@ def _public_task(task: dict) -> dict:
     return {
         key: task.get(key)
         for key in (
-            "run_id",
-            "conversation_id",
-            "owner_id",
-            "status",
+        "run_id",
+        "conversation_id",
+        "status",
             "answer_prefix",
             "error_code",
             "error_message",

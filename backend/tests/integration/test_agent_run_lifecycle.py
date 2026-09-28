@@ -120,6 +120,7 @@ def test_stream_creates_run_and_routes_events_with_run_id():
 
     assert status.status_code == 200
     assert status.json()["status"] == "completed"
+    assert "owner_id" not in status.json()
 
 
 def test_run_control_rejects_other_owner():
