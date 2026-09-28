@@ -9,6 +9,8 @@ def test_agent_node_forwards_final_text_chunks_to_stream_callback():
         SimpleNamespace(
             choices=[SimpleNamespace(delta=SimpleNamespace(content="第一"))]
         ),
+        # 兼容模型在流结束或返回用量信息时发送的空 choices 数据块。
+        SimpleNamespace(choices=[]),
         SimpleNamespace(
             choices=[SimpleNamespace(delta=SimpleNamespace(content="部分"))]
         ),
