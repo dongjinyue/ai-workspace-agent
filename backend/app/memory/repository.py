@@ -415,6 +415,27 @@ def save_message(
     return int(cursor.lastrowid)
 
 
+def get_message(
+    message_id: int,
+    *,
+    conversation_id: str,
+    owner_id: str,
+) -> dict[str, str | int] | None:
+    """按会话归属读取一条消息，用于从持久化任务重建执行参数。"""
+    init_database()
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT m.id, m.role, m.content, m.created_at
+            FROM messages AS m
+            JOIN conversations AS c ON c.id = m.conversation_id
+            WHERE m.id = ? AND m.conversation_id = ? AND c.owner_id = ?
+            """,
+            (message_id, conversation_id, owner_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def delete_message(message_id: int, *, owner_id: str) -> None:
     """删除指定消息，用于 Agent 失败时回滚尚未完成的用户轮次。"""
     with get_connection() as connection:
@@ -465,6 +486,57 @@ def save_assistant_message_with_trace(
             (now, conversation_id, owner_id),
         )
     return message_id
+
+
+def complete_agent_task_with_trace(
+    run_id: str,
+    owner_id: str,
+    conversation_id: str,
+    content: str,
+    trace: dict,
+) -> bool:
+    """原子完成任务并保存助手消息，避免取消与完成互相覆盖。"""
+    init_database()
+    now = _now()
+    trace_json = json.dumps(trace, ensure_ascii=False)
+    with get_connection() as connection:
+        updated = connection.execute(
+            """
+            UPDATE agent_tasks
+            SET status = 'completed', updated_at = ?, finished_at = ?
+            WHERE run_id = ? AND owner_id = ? AND conversation_id = ?
+              AND status IN ('running', 'pause_requested')
+            """,
+            (now, now, run_id, owner_id, conversation_id),
+        )
+        if updated.rowcount == 0:
+            return False
+
+        inserted = connection.execute(
+            """
+            INSERT INTO messages (conversation_id, role, content, created_at)
+            SELECT ?, 'assistant', ?, ? WHERE EXISTS (
+                SELECT 1 FROM conversations WHERE id = ? AND owner_id = ?
+            )
+            """,
+            (conversation_id, content, now, conversation_id, owner_id),
+        )
+        if inserted.rowcount == 0:
+            raise LookupError("会话不存在")
+        message_id = int(inserted.lastrowid)
+        connection.execute(
+            """
+            INSERT INTO agent_runs (
+                assistant_message_id, conversation_id, trace_json, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (message_id, conversation_id, trace_json, now),
+        )
+        connection.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ? AND owner_id = ?",
+            (now, conversation_id, owner_id),
+        )
+    return True
 
 
 def get_messages_with_traces(

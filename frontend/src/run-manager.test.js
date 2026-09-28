@@ -78,6 +78,25 @@ test("暂停、恢复和停止使用对应 Run 的控制接口", async () => {
   assert.equal(fake.calls.some((path) => path.endsWith("/resume")), true);
 });
 
+test("页面刷新后可以恢复服务端持久化的暂停 Run", async () => {
+  const fake = fakeStreamFactory();
+  const manager = createRunManager({
+    streamRequest: fake.streamRequest,
+    request: async () => ({ status: "running" }),
+  });
+  const run = manager.restore({
+    run_id: "paused-1",
+    conversation_id: "c1",
+    status: "paused",
+  });
+
+  assert.equal(run.status, "paused");
+  assert.equal(manager.activeRuns().length, 1);
+  await manager.resume(run);
+  assert.equal(fake.calls.includes("/api/agent/runs/paused-1/resume"), true);
+  assert.equal(run.status, "completed");
+});
+
 test("超时标记为可重试并主动通知后端停止", async () => {
   const requested = [];
   const manager = createRunManager({

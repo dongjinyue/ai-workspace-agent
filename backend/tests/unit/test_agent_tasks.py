@@ -90,3 +90,34 @@ def test_only_one_concurrent_terminal_update_wins():
         "completed",
         "stopped",
     }
+
+
+def test_completed_task_write_does_not_add_answer_after_stop():
+    conversation_id, message_id = _conversation_with_message("owner-atomic")
+    task = repository.create_agent_task(
+        conversation_id,
+        "owner-atomic",
+        message_id,
+    )
+    assert repository.update_agent_task(
+        task["run_id"],
+        "owner-atomic",
+        expected_statuses={"queued"},
+        status="running",
+    )
+    assert repository.update_agent_task(
+        task["run_id"],
+        "owner-atomic",
+        expected_statuses={"running"},
+        status="stopped",
+    )
+
+    assert repository.complete_agent_task_with_trace(
+        task["run_id"],
+        "owner-atomic",
+        conversation_id,
+        "不应保存的回答",
+        {"request_id": task["run_id"]},
+    ) is False
+    messages = repository.get_messages(conversation_id, owner_id="owner-atomic")
+    assert [message["content"] for message in messages] == ["需要暂停的请求"]

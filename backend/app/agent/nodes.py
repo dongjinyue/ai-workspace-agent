@@ -6,12 +6,7 @@ from typing import Any
 
 from openai.types.chat import ChatCompletionMessage
 
-from app.agent.llm import (
-    create_llm_client,
-    model_name,
-    model_request_options,
-    translate_model_error,
-)
+from app.agent.llm import create_llm_client, model_name, translate_model_error
 from app.agent.state import AgentState
 from app.agent.service import get_agent_tool_schemas
 from app.skills.registry import get_skill
@@ -229,7 +224,7 @@ def agent_node(state: AgentState) -> dict[str, Any]:
                 else "auto"
             ),
             "parallel_tool_calls": False,
-            **model_request_options(),
+            "extra_body": {"enable_thinking": False},
         }
         stream_callback = state.get("stream_callback")
         if stream_callback and required_tool is None:

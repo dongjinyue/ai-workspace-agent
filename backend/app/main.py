@@ -1,3 +1,5 @@
+import asyncio
+import queue
 from datetime import datetime, timedelta, timezone
 import os
 import re
@@ -379,29 +381,19 @@ def agent_chat_stream(
     events = agent_run_manager.start(
         task["run_id"], principal.owner_id, worker_factory
     )
-    return _run_event_response(events)
+    return _run_event_response(
+        events, http_request, task["run_id"], principal.owner_id
+    )
 
 
-def _prepare_agent_run(request: ChatRequest, principal: Principal, http_request: Request):
-    """校验并创建 queued Run；这里只预占一次访客额度。"""
-    message = request.message.strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="消息不能为空")
-    _validate_knowledge_access(request, principal)
-    _reserve_guest_quota(principal, http_request)
-    try:
-        conversation_id = conversation_service.resolve_conversation(
-            request.conversation_id, owner_id=principal.owner_id
-        )
-        task = repository.create_agent_task(
-            conversation_id,
-            principal.owner_id,
-            None,
-            quota_reserved=principal.role == "guest",
-        )
-    except ConversationNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-
+def _build_agent_worker_factory(
+    task: dict,
+    principal: Principal,
+    *,
+    message: str,
+    knowledge_base_id: str | None,
+):
+    """从任务元数据构建可重复使用的 Agent worker（工作线程）工厂。"""
     def worker_factory(control, emit):
         def checkpoint_callback(state):
             repository.update_agent_task(
@@ -436,13 +428,14 @@ def _prepare_agent_run(request: ChatRequest, principal: Principal, http_request:
                     status="paused",
                 )
                 emit("paused", {"status": "paused"})
-            else:
+            elif status != "completed":
+                # completed 要等最终结果原子落库后再通知浏览器。
                 emit("status", {"status": status})
 
         turn = conversation_service.run_resumable_task(
             run_id=task["run_id"],
             message=message,
-            knowledge_base_id=request.knowledge_base_id,
+            knowledge_base_id=knowledge_base_id,
             conversation_id=task["conversation_id"],
             owner_id=principal.owner_id,
             allowed_tools=(
@@ -455,14 +448,19 @@ def _prepare_agent_run(request: ChatRequest, principal: Principal, http_request:
         )
         result = turn.agent
         if result.status == "completed":
-            repository.update_agent_task(
-                task["run_id"],
-                principal.owner_id,
-                expected_statuses={"running"},
-                status="completed",
-            )
-            emit("trace", {"trace": turn.trace.to_dict()})
-            emit("done", _turn_payload(task["run_id"], turn))
+            current = repository.get_agent_task(task["run_id"], principal.owner_id)
+            finalized = bool(current and current["status"] == "completed")
+            if current and current["status"] in {"running", "pause_requested"}:
+                # 兼容外部 worker 工厂；真实 ConversationService 已在事务中完成此转换。
+                finalized = repository.update_agent_task(
+                    task["run_id"],
+                    principal.owner_id,
+                    expected_statuses={current["status"]},
+                    status="completed",
+                )
+            if finalized:
+                emit("trace", {"trace": turn.trace.to_dict()})
+                emit("done", _turn_payload(task["run_id"], turn))
         elif result.status == "paused":
             # paused 事件已由 status_callback 发出，等待 resume 继续订阅。
             pass
@@ -471,9 +469,73 @@ def _prepare_agent_run(request: ChatRequest, principal: Principal, http_request:
         elif result.status == "timed_out":
             emit("timeout", {"status": "timed_out", "detail": "任务执行超时，请重试"})
         else:
-            emit("error", {"status": 500, "code": "agent_failed", "detail": "Agent 执行失败，请检查后端日志"})
+            emit(
+                "error",
+                {
+                    "status": 500,
+                    "code": "agent_failed",
+                    "detail": "Agent 执行失败，请检查后端日志",
+                },
+            )
 
-    return task, worker_factory
+    return worker_factory
+
+
+def _build_resumable_worker_factory(task: dict, principal: Principal):
+    """只用数据库中的消息和检查点重建暂停任务，不依赖旧进程闭包。"""
+    checkpoint = task.get("checkpoint")
+    message_id = task.get("user_message_id")
+    if not isinstance(checkpoint, dict) or not message_id:
+        raise LookupError("任务缺少可恢复检查点")
+    message = repository.get_message(
+        message_id,
+        conversation_id=task["conversation_id"],
+        owner_id=principal.owner_id,
+    )
+    if not message or message["role"] != "user":
+        raise LookupError("任务原始问题不存在")
+    knowledge_base_id = checkpoint.get("knowledge_base_id")
+    if principal.role == "guest" and knowledge_base_id:
+        if get_public_knowledge_base(
+            knowledge_base_id,
+            get_public_knowledge_base_ids(),
+            owner_id=principal.owner_id,
+        ) is None:
+            raise LookupError("任务使用的知识库已不可访问")
+    return _build_agent_worker_factory(
+        task,
+        principal,
+        message=str(message["content"]),
+        knowledge_base_id=knowledge_base_id,
+    )
+
+
+def _prepare_agent_run(request: ChatRequest, principal: Principal, http_request: Request):
+    """校验并创建 queued Run；这里只预占一次访客额度。"""
+    message = request.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="消息不能为空")
+    _validate_knowledge_access(request, principal)
+    _reserve_guest_quota(principal, http_request)
+    try:
+        conversation_id = conversation_service.resolve_conversation(
+            request.conversation_id, owner_id=principal.owner_id
+        )
+        task = repository.create_agent_task(
+            conversation_id,
+            principal.owner_id,
+            None,
+            quota_reserved=principal.role == "guest",
+        )
+    except ConversationNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    return task, _build_agent_worker_factory(
+        task,
+        principal,
+        message=message,
+        knowledge_base_id=request.knowledge_base_id,
+    )
 
 
 def _turn_payload(run_id: str, turn) -> dict:
@@ -497,14 +559,36 @@ def _turn_payload(run_id: str, turn) -> dict:
     }
 
 
-def _run_event_response(events):
-    def event_stream():
-        while True:
-            item = events.get()
-            if item is None:
-                break
-            event, data = item
-            yield format_sse(event, data)
+def _run_event_response(
+    events,
+    http_request: Request,
+    run_id: str,
+    owner_id: str,
+):
+    async def event_stream():
+        disconnected = False
+        try:
+            while True:
+                if await http_request.is_disconnected():
+                    disconnected = True
+                    break
+                try:
+                    item = await asyncio.to_thread(events.get, True, 0.5)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    break
+                event, data = item
+                yield format_sse(event, data)
+        except asyncio.CancelledError:
+            disconnected = True
+            raise
+        finally:
+            if disconnected:
+                try:
+                    agent_run_manager.disconnect(run_id, owner_id)
+                except LookupError:
+                    pass
 
     return StreamingResponse(
         event_stream(),
@@ -553,11 +637,25 @@ def pause_agent_run(
 @app.post("/api/agent/runs/{run_id}/resume")
 def resume_agent_run(
     run_id: str,
+    http_request: Request,
     principal: Principal = Depends(get_current_principal),
 ):
     try:
+        task = repository.get_agent_task(run_id, principal.owner_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        worker_factory = (
+            _build_resumable_worker_factory(task, principal)
+            if task.get("checkpoint")
+            else None
+        )
         return _run_event_response(
-            agent_run_manager.resume(run_id, principal.owner_id)
+            agent_run_manager.resume(
+                run_id, principal.owner_id, worker_factory=worker_factory
+            ),
+            http_request,
+            run_id,
+            principal.owner_id,
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail="任务不存在或恢复信息已过期") from error

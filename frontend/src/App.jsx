@@ -253,6 +253,15 @@ function App() {
     setSidebarOpen(false);
     const data = await request(`/api/conversations/${id}/messages`);
     setMessages(data.messages || []);
+    await restorePausedRuns(id);
+  }
+
+  async function restorePausedRuns(id) {
+    if (!id) return;
+    const data = await request(`/api/agent/runs?conversation_id=${encodeURIComponent(id)}`);
+    for (const run of data.runs || []) {
+      if (run.status === "paused") runManager.restore(run);
+    }
   }
 
   async function loadWorkspace(currentSession) {
@@ -269,8 +278,10 @@ function App() {
 
   // 一次性启动流程会复用当前最新的恢复函数，同时避免依赖变化重复引导会话。
   const loadWorkspaceRef = useRef(loadWorkspace);
+  const restorePausedRunsRef = useRef(restorePausedRuns);
   useEffect(() => {
     loadWorkspaceRef.current = loadWorkspace;
+    restorePausedRunsRef.current = restorePausedRuns;
   });
 
   useEffect(() => {
@@ -305,6 +316,7 @@ function App() {
           localStorage.setItem(conversationKey, selectedConversation.id);
           const history = await request(`/api/conversations/${selectedConversation.id}/messages`);
           setMessages(history.messages || []);
+          await restorePausedRunsRef.current(selectedConversation.id);
         }
         else { setConversationId(""); setMessages([]); }
       } catch (loadError) {

@@ -1,7 +1,7 @@
 import logging
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Callable
@@ -281,19 +281,17 @@ class ConversationService:
                 llm_duration_ms=result.llm_duration_ms,
             )
             if result.status == "completed":
-                repository.save_assistant_message_with_trace(
+                finalized = repository.complete_agent_task_with_trace(
+                    run_id,
+                    owner_id,
                     conversation_id,
                     result.answer,
                     trace.to_dict(),
-                    owner_id=owner_id,
                 )
-                repository.update_agent_task(
-                    run_id,
-                    owner_id,
-                    expected_statuses={"running"},
-                    status="completed",
-                    checkpoint=serialize_agent_state(initial_state),
-                )
+                if not finalized:
+                    current_task = repository.get_agent_task(run_id, owner_id)
+                    if current_task and current_task["status"] != "completed":
+                        result = replace(result, status=current_task["status"])
             elif result.status == "stopped":
                 repository.update_agent_task(
                     run_id,

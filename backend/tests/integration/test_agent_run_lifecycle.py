@@ -206,6 +206,114 @@ def test_pause_and_resume_reuse_same_run_without_automatic_continuation():
     assert any(event == "done" for event, _data in second)
     assert all(data["run_id"] == task["run_id"] for _event, data in second)
     assert repository.get_agent_task(task["run_id"], "admin")["status"] == "completed"
+    with pytest.raises(LookupError):
+        main.agent_run_manager.get_events(task["run_id"], "admin")
+
+
+def test_disconnect_stops_active_run_and_releases_session():
+    conversation_id = repository.create_conversation(owner_id="admin")
+    message_id = repository.save_message(
+        conversation_id, "user", "断开测试", owner_id="admin"
+    )
+    task = repository.create_agent_task(conversation_id, "admin", message_id)
+    started = threading.Event()
+
+    def worker_factory(control, _emit):
+        started.set()
+        try:
+            while control.check_boundary() is None:
+                time.sleep(0.001)
+        except Exception:
+            return
+
+    events = main.agent_run_manager.start(task["run_id"], "admin", worker_factory)
+    assert started.wait(timeout=2)
+
+    main.agent_run_manager.disconnect(task["run_id"], "admin")
+    # 断开后订阅者已经离开，不应等待一个只给在线客户端使用的结束事件。
+    del events
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        try:
+            main.agent_run_manager.get_events(task["run_id"], "admin")
+        except LookupError:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("断开后的 Run session 未释放")
+
+    assert repository.get_agent_task(task["run_id"], "admin")["status"] == "stopped"
+    with pytest.raises(LookupError):
+        main.agent_run_manager.get_events(task["run_id"], "admin")
+
+
+def test_resume_rebuilds_worker_after_manager_reset():
+    conversation_id = repository.create_conversation(owner_id="admin")
+    message_id = repository.save_message(
+        conversation_id, "user", "重启后恢复", owner_id="admin"
+    )
+    task = repository.create_agent_task(conversation_id, "admin", message_id)
+
+    def pause_worker(_control, emit):
+        assert repository.update_agent_task(
+            task["run_id"],
+            "admin",
+            expected_statuses={"running"},
+            status="pause_requested",
+        )
+        assert repository.update_agent_task(
+            task["run_id"],
+            "admin",
+            expected_statuses={"pause_requested"},
+            status="paused",
+        )
+        emit("paused", {"status": "paused"})
+
+    first_events = main.agent_run_manager.start(
+        task["run_id"], "admin", pause_worker
+    )
+    _drain_events(first_events)
+    assert repository.update_agent_task(
+        task["run_id"],
+        "admin",
+        expected_statuses={"paused"},
+        checkpoint={
+            "messages": [{"role": "user", "content": "重启后恢复"}],
+            "knowledge_base_id": None,
+        },
+    )
+    main.agent_run_manager.reset()
+
+    def completed_turn(**kwargs):
+        assert repository.update_agent_task(
+            task["run_id"],
+            "admin",
+            expected_statuses={"running"},
+            status="completed",
+        )
+        turn = _turn("恢复成功")
+        return ConversationTurnResult(
+            conversation_id=kwargs["conversation_id"],
+            history_messages=turn.history_messages,
+            agent=turn.agent,
+            trace=turn.trace,
+        )
+
+    with (
+        patch.object(
+            main.conversation_service,
+            "run_resumable_task",
+            side_effect=completed_turn,
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            f"/api/agent/runs/{task['run_id']}/resume",
+            headers={"Origin": "http://localhost:3000"},
+        )
+
+    assert response.status_code == 200
+    assert _event_data(response.text, "done")[0]["answer"] == "恢复成功"
 
 
 def test_cancel_wins_over_late_worker_completion():

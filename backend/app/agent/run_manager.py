@@ -14,6 +14,7 @@ from app.memory import repository
 logger = logging.getLogger(__name__)
 EventQueue = queue.Queue[tuple[str, dict] | None]
 WorkerFactory = Callable[[RunControl, Callable[[str, dict], None]], None]
+EVENT_QUEUE_MAXSIZE = 256
 
 
 @dataclass
@@ -24,6 +25,7 @@ class _RunSession:
     events: EventQueue
     worker_factory: WorkerFactory
     thread: threading.Thread | None = None
+    disconnected: bool = False
 
 
 class RunManager:
@@ -41,8 +43,18 @@ class RunManager:
             return 120.0
 
     def _emit(self, session: _RunSession, event: str, data: dict) -> None:
+        with self._lock:
+            if session.disconnected:
+                return
         payload = {"run_id": session.run_id, **data}
-        session.events.put((event, payload))
+        try:
+            session.events.put_nowait((event, payload))
+        except queue.Full:
+            # 客户端长期不消费时停止任务，避免 token（令牌）无限堆积占用内存。
+            logger.warning("Agent event queue is full, disconnecting run_id=%s", session.run_id)
+            with self._lock:
+                session.disconnected = True
+            session.control.cancel()
 
     def _start_session(
         self,
@@ -60,7 +72,7 @@ class RunManager:
             run_id=run_id,
             owner_id=owner_id,
             control=control,
-            events=queue.Queue(),
+            events=queue.Queue(maxsize=EVENT_QUEUE_MAXSIZE),
             worker_factory=worker_factory,
         )
         with self._lock:
@@ -130,7 +142,38 @@ class RunManager:
             )
             self._emit(session, "status", {"status": "failed"})
         finally:
-            session.events.put(None)
+            task = repository.get_agent_task(session.run_id, session.owner_id)
+            if task and task["status"] in {"running", "pause_requested"}:
+                # Worker（工作线程）异常返回但没有写入终态时，不能留下永远运行的任务。
+                repository.update_agent_task(
+                    session.run_id,
+                    session.owner_id,
+                    expected_statuses={task["status"]},
+                    status="failed",
+                    error_code="agent_incomplete",
+                    error_message="Agent 未正常完成任务",
+                )
+                self._emit(
+                    session,
+                    "error",
+                    {
+                        "status": 500,
+                        "code": "agent_incomplete",
+                        "detail": "Agent 未正常完成任务，请重试",
+                    },
+                )
+                self._emit(session, "status", {"status": "failed"})
+                task = repository.get_agent_task(session.run_id, session.owner_id)
+            if not session.disconnected:
+                try:
+                    session.events.put_nowait(None)
+                except queue.Full:
+                    logger.warning("Agent event queue is full at shutdown run_id=%s", session.run_id)
+            with self._lock:
+                if self._sessions.get(session.run_id) is session and (
+                    task is None or task["status"] != "paused"
+                ):
+                    self._sessions.pop(session.run_id, None)
 
     def request_pause(self, run_id: str, owner_id: str) -> dict:
         task = repository.get_agent_task(run_id, owner_id)
@@ -199,7 +242,32 @@ class RunManager:
             error_message="任务已停止",
         )
         if session and task["status"] != "running":
-            session.events.put(None)
+            try:
+                session.events.put_nowait(None)
+            except queue.Full:
+                with self._lock:
+                    session.disconnected = True
+        return repository.get_agent_task(run_id, owner_id) or task
+
+    def disconnect(self, run_id: str, owner_id: str) -> dict:
+        """客户端断开时停止活动任务，但保留已经暂停的任务供之后恢复。"""
+        task = repository.get_agent_task(run_id, owner_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        with self._lock:
+            session = self._sessions.get(run_id)
+            if session:
+                session.disconnected = True
+                session.control.cancel()
+        if task["status"] in {"queued", "running", "pause_requested"}:
+            repository.update_agent_task(
+                run_id,
+                owner_id,
+                expected_statuses={task["status"]},
+                status="stopped",
+                error_code="client_disconnected",
+                error_message="客户端已断开，任务已停止",
+            )
         return repository.get_agent_task(run_id, owner_id) or task
 
     def get_events(self, run_id: str, owner_id: str) -> EventQueue:

@@ -248,6 +248,28 @@ export function createRunManager({
     retry(run, payload = run.payload) {
       return createRun({ ...payload });
     },
+    restore(runData) {
+      if (!runData?.run_id || !isRunActive(runData.status)) return null;
+      const localId = `restored-${runData.run_id}`;
+      const existing = runs.get(localId);
+      if (existing) return existing;
+      const run = {
+        localId,
+        runId: runData.run_id,
+        conversationId: runData.conversation_id || null,
+        payload: { conversation_id: runData.conversation_id || null, message: "" },
+        status: runData.status,
+        content: runData.answer_prefix || "",
+        answer: runData.answer_prefix || "",
+        trace: null,
+        error: null,
+        timer: null,
+        controller: null,
+      };
+      runs.set(localId, run);
+      notify();
+      return run;
+    },
     activeRuns() {
       return [...runs.values()].filter((run) => isRunActive(run.status));
     },
