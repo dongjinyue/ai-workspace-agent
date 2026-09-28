@@ -105,19 +105,20 @@ def select_required_tool(state: AgentState, available_tools: list[dict]) -> str 
     # 其余实质性问题默认检索，避免模型用通用知识冒充文档依据。
     if _is_greeting(last_user_message):
         return None
-    if "calculator" in available_names and (
-        _has_arithmetic_expression(last_user_message)
-        or any(keyword in last_user_message for keyword in CALCULATOR_KEYWORDS)
+    # 命中特殊意图时，只在对应工具确实可用时路由到工具；
+    # 工具不可用时直接交给模型处理，不能再退回知识库检索造成误答。
+    if _has_arithmetic_expression(last_user_message) or any(
+        keyword in last_user_message for keyword in CALCULATOR_KEYWORDS
     ):
-        return "calculator"
-    if "get_current_time" in available_names and any(
-        keyword in last_user_message for keyword in TIME_KEYWORDS
-    ):
-        return "get_current_time"
-    if "calculate_text_stats" in available_names and any(
-        keyword in last_user_message for keyword in TEXT_STATS_KEYWORDS
-    ):
-        return "calculate_text_stats"
+        return "calculator" if "calculator" in available_names else None
+    if any(keyword in last_user_message for keyword in TIME_KEYWORDS):
+        return "get_current_time" if "get_current_time" in available_names else None
+    if any(keyword in last_user_message for keyword in TEXT_STATS_KEYWORDS):
+        return (
+            "calculate_text_stats"
+            if "calculate_text_stats" in available_names
+            else None
+        )
     if "search_knowledge_base" in available_names and last_user_message.strip():
         return "search_knowledge_base"
     return None

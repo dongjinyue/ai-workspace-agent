@@ -121,6 +121,14 @@ def test_without_knowledge_base_does_not_force_search():
     assert select_required_tool(state, schemas) is None
 
 
+def test_unavailable_special_intent_does_not_fall_back_to_knowledge_search():
+    state = _state(None)
+    state["messages"] = [{"role": "user", "content": "现在几点？"}]
+    schemas = [{"type": "function", "function": {"name": "search_knowledge_base"}}]
+
+    assert select_required_tool(state, schemas) is None
+
+
 def test_document_count_question_forces_info_tool():
     state = _state(None)
     state["messages"] = [{"role": "user", "content": "知识库有多少文档"}]
