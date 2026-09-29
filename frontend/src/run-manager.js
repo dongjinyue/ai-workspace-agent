@@ -47,7 +47,9 @@ export function getCurrentGeneratingRun(runs, conversationId) {
   const targetConversationId = conversationId || null;
   return [...(runs || [])]
     .filter((run) => {
-      const runConversationId = run?.conversationId || run?.payload?.conversation_id || null;
+      // 优先使用发送时保存的会话 ID；新会话的 null 不能被服务端后续分配的 ID 覆盖。
+      const hasPayloadConversationId = Object.prototype.hasOwnProperty.call(run?.payload || {}, "conversation_id");
+      const runConversationId = hasPayloadConversationId ? run.payload.conversation_id : run?.conversationId || null;
       return isRunGenerating(run?.status) && runConversationId === targetConversationId;
     })
     .at(-1) || null;

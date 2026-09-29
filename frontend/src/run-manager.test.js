@@ -177,6 +177,9 @@ test("只有当前会话正在生成的 Run 才控制底部暂停按钮", () => 
   assert.equal(getCurrentGeneratingRun(runs, "current")?.localId, "current-running");
   assert.equal(getCurrentGeneratingRun(runs, "other")?.localId, "other-running");
   assert.equal(getCurrentGeneratingRun(runs, "missing"), null);
+  assert.equal(getCurrentGeneratingRun([
+    { localId: "new-conversation", status: "running", conversationId: "server-created", payload: { conversation_id: null } },
+  ], null)?.localId, "new-conversation");
 });
 
 test("暂停后的新问题直接创建新的 Run，不自动恢复旧 Run", async () => {
