@@ -33,13 +33,22 @@ class RunControl:
     def cancel(self) -> None:
         self._cancel_requested = True
 
+    def poll(self) -> str | None:
+        """返回模型流式输出期间可立即处理的控制状态。"""
+        if self._cancel_requested:
+            return "stopped"
+        if self._clock() >= self._deadline:
+            return "timed_out"
+        return "pause_requested" if self._pause_requested else None
+
     def check_boundary(self) -> str | None:
         """在模型或工具节点结束后检查控制信号。"""
-        if self._cancel_requested:
+        status = self.poll()
+        if status == "stopped":
             raise RunCancelled
-        if self._clock() >= self._deadline:
+        if status == "timed_out":
             raise RunTimedOut
-        return "pause_requested" if self._pause_requested else None
+        return status
 
 
 def _message_content(message: Any) -> str | None:
@@ -105,6 +114,8 @@ def run_resumable_agent(
     """逐节点消费 LangGraph 更新，并在下一节点开始前处理控制信号。"""
     state = merge_agent_update(initial_state, {})
     state["stream_callback"] = on_token
+    # 运行时回调只存在于内存中，checkpoint（检查点）序列化会自动排除它。
+    state["control_poll"] = control.poll
     state["next_node"] = (
         state.get("next_node")
         if state.get("next_node") in {"agent", "tools", "end"}
@@ -118,7 +129,8 @@ def run_resumable_agent(
         return _result_from_state(state, status)
 
     try:
-        control.check_boundary()
+        if control.check_boundary() == "pause_requested":
+            return controlled_result("paused")
         while state.get("next_node") != "end":
             stream = agent_graph.stream(state, stream_mode="updates")
             yielded = False
@@ -128,6 +140,10 @@ def run_resumable_agent(
                         raise RuntimeError("Agent 节点返回了无效状态")
                     yielded = True
                     state = merge_agent_update(state, node_update)
+                    control_status = state.get("control_status")
+                    if control_status in {"paused", "stopped", "timed_out"}:
+                        state["next_node"] = "agent" if control_status == "paused" else "end"
+                        return controlled_result(control_status)
                     state["next_node"] = _next_node(node_name, state, node_update)
                     checkpoint_callback(state)
                     if state["next_node"] == "end":

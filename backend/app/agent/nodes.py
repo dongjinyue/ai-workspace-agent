@@ -154,24 +154,47 @@ def _client():
     return create_llm_client()
 
 
-def _stream_text_response(client, request: dict[str, Any], on_token) -> str:
-    """只流式传输最终文本；工具规划阶段仍使用完整响应，避免拆坏工具参数。"""
+def _stream_text_response(
+    client,
+    request: dict[str, Any],
+    on_token,
+    control_poll=None,
+) -> tuple[str, str | None]:
+    """流式传输最终文本，并在每个片段之间响应暂停、停止和超时。"""
     response = client.chat.completions.create(**request, stream=True)
     parts: list[str] = []
-    for chunk in response:
-        # 部分兼容 OpenAI 接口的模型会发送空 choices 数据块（例如结束或用量信息），需要跳过。
-        choices = getattr(chunk, "choices", None) or []
-        if not choices:
-            continue
-        delta = choices[0].delta
-        content = getattr(delta, "content", None)
-        if content:
-            parts.append(content)
-            on_token(content)
+    control_status = None
+    try:
+        for chunk in response:
+            # 模型响应是长连接，不能等整个响应结束后才检查控制信号。
+            control_status = control_poll() if control_poll else None
+            if control_status in {"pause_requested", "stopped", "timed_out"}:
+                break
+            # 部分兼容 OpenAI 接口的模型会发送空 choices 数据块（例如结束或用量信息），需要跳过。
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = choices[0].delta
+            content = getattr(delta, "content", None)
+            if content:
+                parts.append(content)
+                on_token(content)
+                control_status = control_poll() if control_poll else None
+                if control_status in {"pause_requested", "stopped", "timed_out"}:
+                    break
+    finally:
+        # 尽快关闭上游模型流，避免点击暂停后仍继续消耗模型和网络资源。
+        if control_status in {"pause_requested", "stopped", "timed_out"}:
+            close = getattr(response, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.debug("关闭模型流时出现非阻塞异常", exc_info=True)
     answer = "".join(parts)
-    if not answer:
+    if not answer and control_status is None:
         raise RuntimeError("模型没有返回回答或工具调用")
-    return answer
+    return answer, control_status
 
 
 def agent_node(state: AgentState) -> dict[str, Any]:
@@ -205,6 +228,7 @@ def agent_node(state: AgentState) -> dict[str, Any]:
 
     # perf_counter 使用单调高精度时钟，适合测耗时，不受系统时间调整影响。
     llm_started = perf_counter()
+    streamed_messages = None
     try:
         required_tool = select_required_tool(state, available_tools)
         client = _client()
@@ -232,7 +256,41 @@ def agent_node(state: AgentState) -> dict[str, Any]:
             # 这里关闭工具调用，只把最终回答按片段传给前端，避免把工具参数半成品展示给用户。
             request["tools"] = []
             request["tool_choice"] = "none"
-            answer = _stream_text_response(client, request, stream_callback)
+            answer, control_status = _stream_text_response(
+                client,
+                request,
+                stream_callback,
+                state.get("control_poll"),
+            )
+            prefix = state.get("paused_answer_prefix", "")
+            combined_answer = f"{prefix}{answer}"
+            messages = [*state["messages"]]
+            if combined_answer:
+                partial_message = ChatCompletionMessage(
+                    role="assistant", content=combined_answer
+                )
+                last_role = (
+                    messages[-1].get("role")
+                    if isinstance(messages[-1], dict)
+                    else getattr(messages[-1], "role", None)
+                ) if messages else None
+                if prefix and last_role == "assistant":
+                    messages[-1] = partial_message
+                else:
+                    messages.append(partial_message)
+            if control_status:
+                return {
+                    "messages": messages,
+                    "paused_answer_prefix": combined_answer,
+                    "control_status": {
+                        "pause_requested": "paused",
+                        "stopped": "stopped",
+                        "timed_out": "timed_out",
+                    }[control_status],
+                    "next_node": "agent" if control_status == "pause_requested" else "end",
+                }
+            streamed_messages = messages
+            answer = combined_answer
             message = ChatCompletionMessage(role="assistant", content=answer)
             response = None
         else:
@@ -247,13 +305,19 @@ def agent_node(state: AgentState) -> dict[str, Any]:
         raise RuntimeError("模型没有返回回答或工具调用")
 
     update: dict[str, Any] = {
-        "messages": [*state["messages"], message],
+        "messages": (
+            streamed_messages
+            if streamed_messages is not None
+            else [*state["messages"], message]
+        ),
         "steps": state["steps"] + 1,
         "llm_calls": state.get("llm_calls", 0) + 1,
         "llm_duration_ms": round(
             state.get("llm_duration_ms", 0.0) + llm_duration_ms, 3
         ),
     }
+    if streamed_messages is not None:
+        update["paused_answer_prefix"] = ""
     if message.tool_calls and update["steps"] >= MAX_STEPS:
         update["final_answer"] = "Agent 已达到最大执行步数，工作流已安全停止。"
     return update

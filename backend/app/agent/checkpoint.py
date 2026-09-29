@@ -27,6 +27,8 @@ _STATE_FIELDS = frozenset(
         "llm_duration_ms",
         "retrieval_debug",
         "allowed_tools",
+        "next_node",
+        "paused_answer_prefix",
     }
 )
 _SECRET_PATTERN = re.compile(
@@ -104,9 +106,11 @@ def _restore_message(message: Any) -> Any:
     return message
 
 
-def deserialize_agent_state(raw: str) -> AgentState:
-    """从检查点恢复状态，并把带工具调用的助手消息还原为模型对象。"""
-    decoded = json.loads(raw)
+def deserialize_agent_state(raw: str | dict) -> AgentState:
+    """从字符串或仓库已解析的字典恢复状态，并还原模型消息对象。"""
+    # repository（仓库层）读取 SQLite（数据库）时已经把 JSON 解析成字典，
+    # 直接复制后再处理，避免恢复流程对同一份检查点重复 json.loads（JSON 解析）。
+    decoded = deepcopy(raw) if isinstance(raw, dict) else json.loads(raw)
     if not isinstance(decoded, dict):
         raise ValueError("检查点必须是 JSON 对象")
     decoded["messages"] = [
@@ -122,6 +126,8 @@ def deserialize_agent_state(raw: str) -> AgentState:
     decoded.setdefault("llm_calls", 0)
     decoded.setdefault("llm_duration_ms", 0.0)
     decoded.setdefault("retrieval_debug", {})
+    decoded.setdefault("next_node", None)
+    decoded.setdefault("paused_answer_prefix", "")
     return decoded
 
 

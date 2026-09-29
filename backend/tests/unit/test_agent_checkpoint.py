@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -53,7 +54,9 @@ def _state():
 
 
 def test_checkpoint_round_trip_keeps_tool_call_but_excludes_sensitive_runtime_data():
-    serialized = serialize_agent_state(_state())
+    state = _state()
+    state["next_node"] = "tools"
+    serialized = serialize_agent_state(state)
 
     assert "完整检索正文：不应进入检查点" not in serialized
     assert "sk-secret-key" not in serialized
@@ -64,6 +67,17 @@ def test_checkpoint_round_trip_keeps_tool_call_but_excludes_sensitive_runtime_da
     assert tool_call.function.name == "search_knowledge_base"
     assert restored["retrieved_chunks"] == []
     assert "stream_callback" not in restored
+    assert restored["next_node"] == "tools"
+
+
+def test_deserialize_agent_state_accepts_repository_checkpoint_dict():
+    serialized = serialize_agent_state(_state())
+    checkpoint = json.loads(serialized)
+
+    restored = deserialize_agent_state(checkpoint)
+
+    assert restored["conversation_id"] == "conversation-safe"
+    assert restored["retrieved_chunks"] == []
 
 
 def test_merge_agent_update_does_not_mutate_original_state():

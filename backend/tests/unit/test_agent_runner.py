@@ -140,3 +140,30 @@ def test_timeout_after_model_boundary_never_enters_next_tool(monkeypatch):
 
     assert result.status == "timed_out"
     assert graph.nodes == ["agent"]
+
+
+def test_stream_pause_status_returns_paused_before_agent_route(monkeypatch):
+    class PauseGraph:
+        def stream(self, _state, *, stream_mode):
+            assert stream_mode == "updates"
+            yield {
+                "agent": {
+                    "messages": [{"role": "assistant", "content": "部分"}],
+                    "control_status": "paused",
+                    "next_node": "end",
+                }
+            }
+
+    monkeypatch.setattr("app.agent.runner.agent_graph", PauseGraph())
+    statuses = []
+
+    result = run_resumable_agent(
+        _initial_state(),
+        control=RunControl(timeout_seconds=60),
+        checkpoint_callback=lambda _state: None,
+        status_callback=statuses.append,
+        on_token=None,
+    )
+
+    assert result.status == "paused"
+    assert statuses[-1] == "paused"
