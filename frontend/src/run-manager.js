@@ -144,11 +144,18 @@ export function createRunManager({
   function handleEvent(run, event) {
     const data = event.data || {};
     if (event.event === "run") {
+      const pausePending = run.pausePending;
       update(run, {
         runId: data.run_id || run.runId,
         conversationId: data.conversation_id || run.conversationId,
-        status: data.status || "running",
+        status: pausePending ? "pause_requested" : data.status || "running",
       });
+      if (pausePending && run.runId) {
+        run.pausePending = false;
+        control(run, "pause").catch((error) => {
+          update(run, { status: "running", error: safeError(error) });
+        });
+      }
       return;
     }
     if (event.event === "token") {
@@ -234,6 +241,7 @@ export function createRunManager({
       error: null,
       timer: null,
       controller: null,
+      pausePending: false,
     };
     runs.set(run.localId, run);
     notify();
@@ -244,7 +252,9 @@ export function createRunManager({
   async function control(run, action) {
     if (!run.runId) throw new Error("任务尚未取得执行标识，请稍后重试。");
     const data = await request(`/api/agent/runs/${run.runId}/${action}`, { method: "POST" });
-    if (data?.status) update(run, { status: data.status });
+    if (data?.status && (action !== "pause" || isRunGenerating(run.status))) {
+      update(run, { status: data.status });
+    }
     return run;
   }
 
@@ -253,6 +263,12 @@ export function createRunManager({
       return createRun(payload);
     },
     pause(run) {
+      if (!run.runId) {
+        // SSE（服务器推送事件）还没发回 run_id 时，先记录意图，收到标识后立即补发暂停请求。
+        run.pausePending = true;
+        update(run, { status: "pause_requested" });
+        return Promise.resolve(run);
+      }
       return control(run, "pause");
     },
     cancel(run) {

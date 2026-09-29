@@ -202,6 +202,32 @@ test("暂停后的新问题直接创建新的 Run，不自动恢复旧 Run", asy
   assert.equal(next.answer, "answer-run-1");
 });
 
+test("run_id 尚未到达时点击暂停会暂存请求，收到标识后立即暂停", async () => {
+  let releaseStream;
+  const requested = [];
+  const manager = createRunManager({
+    streamRequest: async (_path, _options, onEvent) => {
+      await new Promise((resolve) => { releaseStream = resolve; });
+      onEvent({ event: "run", data: { run_id: "late-run", status: "running" } });
+      onEvent({ event: "done", data: { run_id: "late-run", answer: "完成" } });
+    },
+    request: async (path, options) => {
+      requested.push([path, options?.method]);
+      return { status: "pause_requested" };
+    },
+  });
+  const run = manager.start({ message: "马上暂停" });
+
+  await manager.pause(run);
+  assert.equal(run.status, "pause_requested");
+  assert.deepEqual(requested, []);
+
+  releaseStream();
+  await run.done;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(requested, [["/api/agent/runs/late-run/pause", "POST"]]);
+});
+
 test("检索调试信息只保留 TopK、阈值和数值匹配元数据", () => {
   const safe = getSafeRagDebug({
     top_k: 5,
