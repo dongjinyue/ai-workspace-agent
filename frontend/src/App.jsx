@@ -459,10 +459,6 @@ function App() {
     }
   }
 
-  function dismissRun(run) {
-    setMessages((items) => items.map((item) => item.runKey === run.localId ? { ...item, dismissed: true } : item));
-  }
-
   async function sendMessage() {
     const content = question.trim();
     if (!content || (session?.quota && session.quota.remaining <= 0)) return;
@@ -594,7 +590,7 @@ function App() {
           const controlState = run ? getRunControlState(run.status) : null;
           return <article className={`message ${message.role}`} key={message.id || `${message.role}-${index}`}>
             {message.role === "assistant" && <div className="avatar ai" aria-hidden="true">AI</div>}
-            <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(liveTrace?.completed_at || message.created_at)}{liveTrace?.duration_ms != null ? ` · 用时 ${formatDuration(liveTrace.duration_ms)}` : ""}</time></div>{run && <div className="run-controls" aria-label={`任务状态：${getRunStatusLabel(run.status)}`}><span className={`run-status run-status-${run.status}`}>{getRunStatusLabel(run.status)}</span>{controlState?.canRetry && <button type="button" onClick={() => handleRunAction("retry", run)}>重试</button>}{!liveStreaming && (controlState?.canRetry || run.status === "completed") && <button type="button" className="run-close" onClick={() => dismissRun(run)}>关闭</button>}</div>}{run?.error && !liveStreaming && <div className="run-error" role="status">{run.error.message}</div>}{message.role === "assistant" && <ExecutionTrace trace={liveTrace} />}{(!liveStreaming || liveContent) && <div className="bubble">{liveContent}</div>}{message.role === "assistant" && liveStreaming && !liveContent && <div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div>}</div>
+            <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(liveTrace?.completed_at || message.created_at)}{liveTrace?.duration_ms != null ? ` · 用时 ${formatDuration(liveTrace.duration_ms)}` : ""}</time></div>{run && <div className="run-controls" aria-label={`任务状态：${getRunStatusLabel(run.status)}`}><span className={`run-status run-status-${run.status}`}>{getRunStatusLabel(run.status)}</span>{controlState?.canRetry && <button type="button" onClick={() => handleRunAction("retry", run)}>重试</button>}</div>}{run?.error && !liveStreaming && <div className="run-error" role="status">{run.error.message}</div>}{message.role === "assistant" && <ExecutionTrace trace={liveTrace} />}{(!liveStreaming || liveContent) && <div className="bubble">{liveContent}</div>}{message.role === "assistant" && liveStreaming && !liveContent && <div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div>}</div>
             {message.role === "user" && <div className="avatar user" aria-hidden="true">你</div>}
           </article>;
         })}

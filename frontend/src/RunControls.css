@@ -50,10 +50,6 @@
   cursor: not-allowed;
 }
 
-.run-controls .run-close {
-  color: #8b93a3;
-}
-
 .run-error {
   margin: 0 0 8px;
   padding: 8px 10px;
