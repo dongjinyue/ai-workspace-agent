@@ -39,7 +39,9 @@ def test_upload_rejects_prompt_injection_with_client_error():
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "文档包含疑似提示词注入内容，已拒绝上传"
+    assert response.json()["detail"] == (
+        "文件《unsafe.txt》第 1 行发现疑似提示词注入，命中规则“忽略之前”。上传已拒绝。"
+    )
 
 
 def test_knowledge_base_can_be_listed_and_deleted():

@@ -4,7 +4,11 @@ import re
 from app.configuration import get_rag_top_k
 from app.rag.embeddings import embed_texts
 from app.rag.vector_store import SearchMatch, add_chunks, find_collection, search_chunks
-from app.security import PromptInjectionError, contains_prompt_injection
+from app.security import (
+    PromptInjectionError,
+    TextRegion,
+    find_prompt_injections,
+)
 
 
 def split_text(
@@ -73,10 +77,16 @@ def index_document(
     text: str,
     source_filename: str | None = None,
     upload_batch: str | None = None,
+    source_regions: tuple[TextRegion, ...] = (),
 ) -> int:
     """切分文档、批量向量化并持久化到指定知识库。"""
-    if contains_prompt_injection(text):
-        raise PromptInjectionError("文档包含疑似提示词注入内容，已拒绝上传")
+    findings = find_prompt_injections(
+        text,
+        source_filename=source_filename,
+        regions=source_regions,
+    )
+    if findings:
+        raise PromptInjectionError(findings)
     chunks = split_text(text)
     if not chunks:
         return 0

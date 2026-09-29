@@ -1,12 +1,15 @@
 from io import BytesIO
 from pathlib import Path
 from functools import lru_cache
+from dataclasses import dataclass
 from threading import Lock
 
 from docx import Document
 from pypdf import PdfReader
 import pypdfium2 as pdfium
 from rapidocr import RapidOCR
+
+from app.security import TextRegion
 
 
 SUPPORTED_EXTENSIONS = frozenset({".txt", ".md", ".docx", ".pdf"})
@@ -17,6 +20,14 @@ _OCR_LOCK = Lock()
 
 class DocumentParseError(ValueError):
     """上传文档格式不支持、内容损坏或无法提取文本。"""
+
+
+@dataclass(frozen=True)
+class ParsedDocument:
+    """解析后的正文及其可用于安全提示的来源区域。"""
+
+    text: str
+    regions: tuple[TextRegion, ...] = ()
 
 
 @lru_cache(maxsize=1)
@@ -75,7 +86,7 @@ def _parse_docx(content: bytes, filename: str) -> str:
         raise DocumentParseError(f"{filename} 不是有效的 DOCX 文档") from error
 
 
-def _parse_pdf(content: bytes, filename: str) -> str:
+def _parse_pdf_with_locations(content: bytes, filename: str) -> ParsedDocument:
     try:
         reader = PdfReader(BytesIO(content))
         pages = [(page.extract_text() or "").strip() for page in reader.pages]
@@ -85,14 +96,26 @@ def _parse_pdf(content: bytes, filename: str) -> str:
             for index, text in _ocr_pdf_pages(content, ocr_indexes).items():
                 if text:
                     pages[index] = text
-        return "\n\n".join(page for page in pages if page)
+        parts: list[str] = []
+        regions: list[TextRegion] = []
+        cursor = 0
+        for page_number, page_text in enumerate(pages, start=1):
+            if not page_text:
+                continue
+            if parts:
+                cursor += 2  # 对应页面之间的两个换行符。
+            start = cursor
+            parts.append(page_text)
+            cursor += len(page_text)
+            regions.append(TextRegion(start, cursor, f"第 {page_number} 页"))
+        return ParsedDocument("\n\n".join(parts), tuple(regions))
     except DocumentParseError:
         raise
     except Exception as error:
         raise DocumentParseError(f"{filename} 不是有效或未加密的 PDF 文档") from error
 
 
-def parse_document(filename: str, content: bytes) -> str:
+def parse_document_with_locations(filename: str, content: bytes) -> ParsedDocument:
     """根据扩展名安全解析文档正文，不执行文档中的宏、脚本或链接。"""
     extension = Path(filename).suffix.lower()
     if extension not in SUPPORTED_EXTENSIONS:
@@ -100,7 +123,12 @@ def parse_document(filename: str, content: bytes) -> str:
             raise DocumentParseError("旧版 DOC 暂不支持，请另存为 DOCX 后上传")
         raise DocumentParseError("仅支持 TXT、Markdown、DOCX 和 PDF 文件")
     if extension in {".txt", ".md"}:
-        return _decode_text(content, filename)
+        return ParsedDocument(_decode_text(content, filename))
     if extension == ".docx":
-        return _parse_docx(content, filename)
-    return _parse_pdf(content, filename)
+        return ParsedDocument(_parse_docx(content, filename))
+    return _parse_pdf_with_locations(content, filename)
+
+
+def parse_document(filename: str, content: bytes) -> str:
+    """兼容旧调用方，只返回文档正文。"""
+    return parse_document_with_locations(filename, content).text

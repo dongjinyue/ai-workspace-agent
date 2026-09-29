@@ -49,7 +49,7 @@ from app.quotas import (
     reserve_guest_ai_request,
 )
 from app.rag.service import index_document, semantic_search
-from app.rag.document_parser import DocumentParseError, parse_document
+from app.rag.document_parser import DocumentParseError, parse_document_with_locations
 from app.rag.catalog import (
     append_knowledge_documents,
     delete_knowledge_document as delete_knowledge_document_metadata,
@@ -73,6 +73,7 @@ from app.rag.vector_store import (
 from app.security import (
     InMemoryRateLimiter,
     PromptInjectionError,
+    TextRegion,
 )
 from app.streaming import format_sse
 
@@ -864,18 +865,23 @@ async def upload_document(
             )
 
     # 先检查整批文件的字节数，再做 PDF OCR 或向量化，避免超额文件消耗处理资源。
-    parsed_documents: list[tuple[str, str, int]] = []
+    parsed_documents: list[tuple[str, str, int, tuple[TextRegion, ...]]] = []
     for filename, content in uploaded_documents:
         try:
-            text = await run_in_threadpool(parse_document, filename, content)
+            parsed = await run_in_threadpool(
+                parse_document_with_locations,
+                filename,
+                content,
+            )
         except DocumentParseError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        text = parsed.text
         if not text.strip():
             raise HTTPException(
                 status_code=400,
                 detail=f"无法从 {filename} 识别有效文字；请确认扫描清晰、方向正确且页数不超过限制",
             )
-        parsed_documents.append((filename, text, len(content)))
+        parsed_documents.append((filename, text, len(content), parsed.regions))
 
     knowledge_base_id = knowledge_base_id or uuid4().hex
     upload_batch = uuid4().hex
@@ -888,13 +894,14 @@ async def upload_document(
             delete_chunks_by_upload_batch(knowledge_base_id, upload_batch)
 
     try:
-        for filename, text, size_bytes in parsed_documents:
+        for filename, text, size_bytes, source_regions in parsed_documents:
             chunk_count = await run_in_threadpool(
                 index_document,
                 knowledge_base_id,
                 text,
                 filename,
                 upload_batch,
+                source_regions=source_regions,
             )
             if chunk_count == 0:
                 raise DocumentParseError(f"{filename} 中没有可用的文本内容")
