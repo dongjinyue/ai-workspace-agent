@@ -55,6 +55,22 @@ export function getCurrentGeneratingRun(runs, conversationId) {
     .at(-1) || null;
 }
 
+/**
+ * 找到当前会话最近一个已暂停的 Run（执行任务）。
+ *
+ * 已暂停任务不再显示暂停按钮，但保留继续入口；用户输入新问题后仍可直接发送新 Run。
+ */
+export function getCurrentPausedRun(runs, conversationId) {
+  const targetConversationId = conversationId || null;
+  return [...(runs || [])]
+    .filter((run) => {
+      const hasPayloadConversationId = Object.prototype.hasOwnProperty.call(run?.payload || {}, "conversation_id");
+      const runConversationId = hasPayloadConversationId ? run.payload.conversation_id : run?.conversationId || null;
+      return run?.status === "paused" && runConversationId === targetConversationId;
+    })
+    .at(-1) || null;
+}
+
 export function getRunStatusLabel(status) {
   return STATUS_LABELS[status] || "处理中";
 }

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getAccessToken, isSupabaseConfigured, signInAdmin, signOutAdmin } from "./auth.js";
 import { formatQuotaStatus } from "./usage.js";
 import { createSseParser } from "./streaming.js";
-import { createRunManager, getCurrentGeneratingRun, getRunControlState, getRunStatusLabel, getSafeRagDebug, getSafeRunError, isRunGenerating } from "./run-manager.js";
+import { createRunManager, getCurrentGeneratingRun, getCurrentPausedRun, getRunControlState, getRunStatusLabel, getSafeRagDebug, getSafeRunError, isRunGenerating } from "./run-manager.js";
 import "./App.css";
 import "./AgentStatus.css";
 import "./ExecutionTrace.css";
@@ -212,6 +212,7 @@ function App() {
   const runManager = runManagerRef.current;
   const generatingRuns = runViews.filter((run) => isRunGenerating(run.status));
   const currentGeneratingRun = getCurrentGeneratingRun(runViews, conversationId);
+  const currentPausedRun = getCurrentPausedRun(runViews, conversationId);
   const hasActiveRuns = generatingRuns.length > 0;
 
   const role = session?.role;
@@ -602,7 +603,7 @@ function App() {
       <footer>
         <div className="quota-banner" role="status"><span>{session ? quotaCopy : "正在读取使用额度…"}</span>{!isAdmin && session?.quota && <span>IP 保护：每分钟 5 次，全天 30 次</span>}</div>
         {error && <div className="error" role="alert">{error}</div>}
-        <div className="composer"><textarea className="resize-none" aria-label="输入你的问题" rows="1" maxLength="4000" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!currentGeneratingRun) sendMessage(); } }} placeholder={exhausted ? "今日访客提问次数已用完" : "输入你的问题…"} disabled={!session || exhausted} /><button type="button" className={currentGeneratingRun ? "composer-pause" : "composer-send"} aria-label={currentGeneratingRun ? (currentGeneratingRun.status === "pause_requested" ? "正在暂停回答" : "暂停回答") : "发送问题"} title={currentGeneratingRun ? "暂停当前回答" : "发送问题"} onClick={currentGeneratingRun ? () => handleRunAction("pause", currentGeneratingRun) : sendMessage} disabled={currentGeneratingRun ? currentGeneratingRun.status === "pause_requested" : !question.trim() || !session || exhausted} aria-busy={currentGeneratingRun?.status === "pause_requested"}>{currentGeneratingRun ? "⏸" : "↑"}</button></div>
+        <div className="composer"><textarea className="resize-none" aria-label="输入你的问题" rows="1" maxLength="4000" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!currentGeneratingRun) sendMessage(); } }} placeholder={exhausted ? "今日访客提问次数已用完" : "输入你的问题…"} disabled={!session || exhausted} /><button type="button" className={currentGeneratingRun ? "composer-pause" : currentPausedRun && !question.trim() ? "composer-resume" : "composer-send"} aria-label={currentGeneratingRun ? (currentGeneratingRun.status === "pause_requested" ? "正在暂停回答" : "暂停回答") : currentPausedRun && !question.trim() ? "继续回答" : "发送问题"} title={currentGeneratingRun ? "暂停当前回答" : currentPausedRun && !question.trim() ? "继续回答" : "发送问题"} onClick={currentGeneratingRun ? () => handleRunAction("pause", currentGeneratingRun) : currentPausedRun && !question.trim() ? () => handleRunAction("resume", currentPausedRun) : sendMessage} disabled={currentGeneratingRun ? currentGeneratingRun.status === "pause_requested" : currentPausedRun && !question.trim() ? !session : !question.trim() || !session || exhausted} aria-busy={currentGeneratingRun?.status === "pause_requested"}>{currentGeneratingRun ? "⏸" : currentPausedRun && !question.trim() ? "▶" : "↑"}</button></div>
         <small>Enter 发送 · Shift + Enter 换行 · {isAdmin ? "管理员模式不受访客次数限制" : "每日 10 次 · 北京时间午夜重置"}</small>
       </footer>
     </section>

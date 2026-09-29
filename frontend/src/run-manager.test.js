@@ -182,6 +182,16 @@ test("只有当前会话正在生成的 Run 才控制底部暂停按钮", () => 
   ], null)?.localId, "new-conversation");
 });
 
+test("当前会话的已暂停 Run 提供继续入口", async () => {
+  const runManagerModule = await import("./run-manager.js");
+  const pausedRun = { localId: "paused-current", status: "paused", conversationId: "current" };
+  const otherPausedRun = { localId: "paused-other", status: "paused", conversationId: "other" };
+
+  assert.equal(typeof runManagerModule.getCurrentPausedRun, "function");
+  assert.equal(runManagerModule.getCurrentPausedRun([otherPausedRun, pausedRun], "current")?.localId, "paused-current");
+  assert.equal(runManagerModule.getCurrentPausedRun([pausedRun], "other"), null);
+});
+
 test("暂停后的新问题直接创建新的 Run，不自动恢复旧 Run", async () => {
   const fake = fakeStreamFactory();
   const manager = createRunManager({
