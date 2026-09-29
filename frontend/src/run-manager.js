@@ -5,6 +5,9 @@ const ACTIVE_STATUSES = new Set([
   "paused",
 ]);
 
+// 暂停任务仍需保留在列表中用于恢复，但它已经不再生成内容。
+const GENERATING_STATUSES = new Set(["queued", "running", "pause_requested"]);
+
 const STATUS_LABELS = {
   queued: "排队中",
   running: "运行中",
@@ -29,6 +32,25 @@ const STATUS_ERROR_MESSAGES = {
 
 export function isRunActive(status) {
   return ACTIVE_STATUSES.has(status);
+}
+
+export function isRunGenerating(status) {
+  return GENERATING_STATUSES.has(status);
+}
+
+/**
+ * 找到当前会话最近一个仍在生成的 Run（执行任务）。
+ *
+ * 暂停 Run 不会占用输入框的暂停按钮，这样用户可以直接发送下一个问题。
+ */
+export function getCurrentGeneratingRun(runs, conversationId) {
+  const targetConversationId = conversationId || null;
+  return [...(runs || [])]
+    .filter((run) => {
+      const runConversationId = run?.conversationId || run?.payload?.conversation_id || null;
+      return isRunGenerating(run?.status) && runConversationId === targetConversationId;
+    })
+    .at(-1) || null;
 }
 
 export function getRunStatusLabel(status) {

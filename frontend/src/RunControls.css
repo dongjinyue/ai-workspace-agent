@@ -50,10 +50,6 @@
   cursor: not-allowed;
 }
 
-.run-controls .run-stop {
-  color: #a33d3d;
-}
-
 .run-controls .run-close {
   color: #8b93a3;
 }

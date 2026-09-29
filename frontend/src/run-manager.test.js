@@ -7,6 +7,8 @@ import {
   getRunStatusLabel,
   getSafeRagDebug,
   getSafeRunError,
+  getCurrentGeneratingRun,
+  isRunGenerating,
 } from "./run-manager.js";
 
 function fakeStreamFactory() {
@@ -160,6 +162,41 @@ test("Run 状态文案和按钮状态能够区分暂停、停止与重试", () =
     canCancel: false,
     canRetry: true,
   });
+});
+
+test("只有当前会话正在生成的 Run 才控制底部暂停按钮", () => {
+  const runs = [
+    { localId: "other-running", status: "running", conversationId: "other" },
+    { localId: "paused", status: "paused", conversationId: "current" },
+    { localId: "current-running", status: "running", conversationId: "current" },
+  ];
+
+  assert.equal(isRunGenerating("queued"), true);
+  assert.equal(isRunGenerating("pause_requested"), true);
+  assert.equal(isRunGenerating("paused"), false);
+  assert.equal(getCurrentGeneratingRun(runs, "current")?.localId, "current-running");
+  assert.equal(getCurrentGeneratingRun(runs, "other")?.localId, "other-running");
+  assert.equal(getCurrentGeneratingRun(runs, "missing"), null);
+});
+
+test("暂停后的新问题直接创建新的 Run，不自动恢复旧 Run", async () => {
+  const fake = fakeStreamFactory();
+  const manager = createRunManager({
+    streamRequest: fake.streamRequest,
+    request: async () => ({ status: "paused" }),
+  });
+  const paused = manager.restore({
+    run_id: "paused-old",
+    conversation_id: "c1",
+    status: "paused",
+  });
+
+  const next = manager.start({ message: "下一个问题", conversation_id: "c1" });
+  await next.done;
+
+  assert.equal(paused.status, "paused");
+  assert.equal(fake.calls.includes("/api/agent/runs/paused-old/resume"), false);
+  assert.equal(next.answer, "answer-run-1");
 });
 
 test("检索调试信息只保留 TopK、阈值和数值匹配元数据", () => {

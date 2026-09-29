@@ -89,6 +89,9 @@ button { cursor: pointer; }
 .composer textarea:disabled { cursor: not-allowed; }
 .composer button { width: 40px; height: 40px; flex: 0 0 40px; border: 0; border-radius: 10px; color: #fff; background: #5b5bd6; font-size: 20px; }
 .composer button:disabled { color: #fff; background: #aeb5c3; cursor: not-allowed; }
+.composer button.composer-pause { color: #514dc7; background: #e8e8ff; font-size: 18px; }
+.composer button.composer-pause:hover:not(:disabled) { background: #dcdcff; }
+.composer button.composer-pause:disabled { color: #6966b7; background: #d5d6f1; }
 .chat-panel footer > small { display: block; margin-top: 9px; color: #8992a2; font-size: 9px; line-height: 1.5; }
 .error { margin-bottom: 8px; padding: 9px 12px; border-radius: 8px; color: #9c3333; background: #fff0f0; font-size: 11px; line-height: 1.5; text-align: left; }
 .mobile-menu, .sidebar-mask { display: none; }

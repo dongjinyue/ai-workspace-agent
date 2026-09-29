@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getAccessToken, isSupabaseConfigured, signInAdmin, signOutAdmin } from "./auth.js";
 import { formatQuotaStatus } from "./usage.js";
 import { createSseParser } from "./streaming.js";
-import { createRunManager, getRunControlState, getRunStatusLabel, getSafeRagDebug, getSafeRunError, isRunActive } from "./run-manager.js";
+import { createRunManager, getCurrentGeneratingRun, getRunControlState, getRunStatusLabel, getSafeRagDebug, getSafeRunError, isRunGenerating } from "./run-manager.js";
 import "./App.css";
 import "./AgentStatus.css";
 import "./ExecutionTrace.css";
@@ -210,8 +210,9 @@ function App() {
     });
   }
   const runManager = runManagerRef.current;
-  const activeRuns = runViews.filter((run) => isRunActive(run.status));
-  const hasActiveRuns = activeRuns.length > 0;
+  const generatingRuns = runViews.filter((run) => isRunGenerating(run.status));
+  const currentGeneratingRun = getCurrentGeneratingRun(runViews, conversationId);
+  const hasActiveRuns = generatingRuns.length > 0;
 
   const role = session?.role;
   const isAdmin = role === "admin";
@@ -473,7 +474,7 @@ function App() {
     });
     setMessages((items) => [...items,
       { id: `user-${run.localId}`, role: "user", content, created_at: new Date().toISOString() },
-      { id: `assistant-${run.localId}`, role: "assistant", content: run.content, created_at: new Date().toISOString(), streaming: isRunActive(run.status), runKey: run.localId, runId: run.runId, runStatus: run.status, trace: run.trace },
+      { id: `assistant-${run.localId}`, role: "assistant", content: run.content, created_at: new Date().toISOString(), streaming: isRunGenerating(run.status), runKey: run.localId, runId: run.runId, runStatus: run.status, trace: run.trace },
     ]);
     watchRun(run, content, role);
   }
@@ -587,12 +588,12 @@ function App() {
           if (message.dismissed) return null;
           const run = message.runKey ? runViews.find((candidate) => candidate.localId === message.runKey) : null;
           const liveTrace = run?.trace || message.trace;
-          const liveStreaming = run ? isRunActive(run.status) : message.streaming;
+          const liveStreaming = run ? isRunGenerating(run.status) : message.streaming;
           const liveContent = run?.content || (run?.error && !liveStreaming ? run.error.message : message.content);
           const controlState = run ? getRunControlState(run.status) : null;
           return <article className={`message ${message.role}`} key={message.id || `${message.role}-${index}`}>
             {message.role === "assistant" && <div className="avatar ai" aria-hidden="true">AI</div>}
-            <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(liveTrace?.completed_at || message.created_at)}{liveTrace?.duration_ms != null ? ` · 用时 ${formatDuration(liveTrace.duration_ms)}` : ""}</time></div>{run && <div className="run-controls" aria-label={`任务状态：${getRunStatusLabel(run.status)}`}><span className={`run-status run-status-${run.status}`}>{getRunStatusLabel(run.status)}</span>{controlState.canPause && <button type="button" onClick={() => handleRunAction("pause", run)} disabled={!run.runId}>暂停</button>}{controlState.canResume && <button type="button" onClick={() => handleRunAction("resume", run)} disabled={!run.runId}>继续</button>}{controlState.canCancel && <button type="button" className="run-stop" onClick={() => handleRunAction("cancel", run)} disabled={!run.runId}>停止</button>}{controlState.canRetry && <button type="button" onClick={() => handleRunAction("retry", run)}>重试</button>}{!liveStreaming && (controlState.canRetry || run.status === "completed") && <button type="button" className="run-close" onClick={() => dismissRun(run)}>关闭</button>}</div>}{run?.error && !liveStreaming && <div className="run-error" role="status">{run.error.message}</div>}{message.role === "assistant" && <ExecutionTrace trace={liveTrace} />}{(!liveStreaming || liveContent) && <div className="bubble">{liveContent}</div>}{message.role === "assistant" && liveStreaming && !liveContent && <div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div>}</div>
+            <div className="message-content"><div className="message-meta"><span>{message.role === "assistant" ? "AI 助手" : "你"}</span><time>{formatTime(liveTrace?.completed_at || message.created_at)}{liveTrace?.duration_ms != null ? ` · 用时 ${formatDuration(liveTrace.duration_ms)}` : ""}</time></div>{run && <div className="run-controls" aria-label={`任务状态：${getRunStatusLabel(run.status)}`}><span className={`run-status run-status-${run.status}`}>{getRunStatusLabel(run.status)}</span>{controlState?.canRetry && <button type="button" onClick={() => handleRunAction("retry", run)}>重试</button>}{!liveStreaming && (controlState?.canRetry || run.status === "completed") && <button type="button" className="run-close" onClick={() => dismissRun(run)}>关闭</button>}</div>}{run?.error && !liveStreaming && <div className="run-error" role="status">{run.error.message}</div>}{message.role === "assistant" && <ExecutionTrace trace={liveTrace} />}{(!liveStreaming || liveContent) && <div className="bubble">{liveContent}</div>}{message.role === "assistant" && liveStreaming && !liveContent && <div className="typing" role="status"><i /><i /><i /><span className="sr-only">正在生成回答</span></div>}</div>
             {message.role === "user" && <div className="avatar user" aria-hidden="true">你</div>}
           </article>;
         })}
@@ -601,7 +602,7 @@ function App() {
       <footer>
         <div className="quota-banner" role="status"><span>{session ? quotaCopy : "正在读取使用额度…"}</span>{!isAdmin && session?.quota && <span>IP 保护：每分钟 5 次，全天 30 次</span>}</div>
         {error && <div className="error" role="alert">{error}</div>}
-        <div className="composer"><textarea className="resize-none" aria-label="输入你的问题" rows="1" maxLength="4000" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); sendMessage(); } }} placeholder={exhausted ? "今日访客提问次数已用完" : "输入你的问题…"} disabled={!session || exhausted} /><button aria-label="发送问题" onClick={sendMessage} disabled={!question.trim() || !session || exhausted} aria-busy={hasActiveRuns}>↑</button></div>
+        <div className="composer"><textarea className="resize-none" aria-label="输入你的问题" rows="1" maxLength="4000" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (!currentGeneratingRun) sendMessage(); } }} placeholder={exhausted ? "今日访客提问次数已用完" : "输入你的问题…"} disabled={!session || exhausted} /><button type="button" className={currentGeneratingRun ? "composer-pause" : "composer-send"} aria-label={currentGeneratingRun ? (currentGeneratingRun.status === "pause_requested" ? "正在暂停回答" : "暂停回答") : "发送问题"} title={currentGeneratingRun ? "暂停当前回答" : "发送问题"} onClick={currentGeneratingRun ? () => handleRunAction("pause", currentGeneratingRun) : sendMessage} disabled={currentGeneratingRun ? !currentGeneratingRun.runId || currentGeneratingRun.status === "pause_requested" : !question.trim() || !session || exhausted} aria-busy={currentGeneratingRun?.status === "pause_requested"}>{currentGeneratingRun ? "⏸" : "↑"}</button></div>
         <small>Enter 发送 · Shift + Enter 换行 · {isAdmin ? "管理员模式不受访客次数限制" : "每日 10 次 · 北京时间午夜重置"}</small>
       </footer>
     </section>
