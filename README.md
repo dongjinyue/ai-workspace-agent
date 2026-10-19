@@ -8,8 +8,9 @@
 - FastAPI 后端，使用 Pydantic 校验输入并提供 OpenAPI 文档。
 - SQLite 持久化会话、消息和不含隐藏思维链的 Agent 执行元数据。
 - Chroma PersistentClient 持久化知识库向量。
-- DashScope 千问 Chat Completion 与 `text-embedding-v4`。
+- LangChain（大模型应用框架）通过 ChatOpenAI（聊天适配器）调用 DashScope 千问；嵌入继续使用 `text-embedding-v4`。
 - LangGraph 有限循环，支持连续工具决策，最大执行步数为 5。
+- LangSmith（执行追踪平台）可选记录图、模型、工具和检索的关联元数据，默认关闭上传。
 - Calculator、Knowledge、Task Skill 与动态 MCP Tool Registry。
 - MCP Client 真实执行 `initialize()`、`list_tools()` 和 `call_tool()`。
 - 文档大小、编码、扩展名与基础 Prompt Injection（提示词注入）检测。
@@ -32,7 +33,9 @@ flowchart LR
     RAG --> EMB[Embedding API]
     RAG --> CHROMA[(Chroma)]
     MCP -->|stdio MCP Protocol| SERVER[MCP Server]
-    GRAPH --> LLM
+    GRAPH --> LC[LangChain ChatOpenAI]
+    LC --> LLM[通义千问]
+    GRAPH -.可选安全元数据.-> LS[LangSmith]
 ```
 
 ## Agent 工作流程
@@ -44,6 +47,51 @@ flowchart LR
 5. 工具结果被标记为不可信数据，再交给模型生成最终回答。
 6. 最多执行 5 个 Agent/Tool 步骤，避免无限循环。
 7. 助手回答与安全 Trace（轨迹）以独立数据结构持久化。
+
+### 三套框架如何配合
+
+LangChain 负责统一模型消息、模型工具绑定与结构化工具调用；LangGraph 负责决定下一步进入模型节点还是工具节点；LangSmith 用来观察这些步骤的关联、耗时和错误。工具执行仍经过项目自己的权限与参数检查。
+
+| 代码 | 阅读重点 |
+| --- | --- |
+| `backend/app/agent/llm.py` | ChatOpenAI 模型工厂，保留千问接口地址、模型名、超时与重试配置。 |
+| `backend/app/agent/messages.py` | 标准用户、助手、系统和工具消息；转换旧格式。 |
+| `backend/app/agent/graph.py` | LangGraph 的两个节点及条件路由。 |
+| `backend/app/agent/nodes.py` | 绑定工具、模型决策、权限交集和五步预算。 |
+| `backend/app/agent/model_response.py` | 累积流式工具参数，完整后才能执行；支持流内暂停。 |
+| `backend/app/agent/tool_adapter.py` | 从注册表构建 LangChain 结构化工具，校验后调用本地处理器或真实 MCP。 |
+| `backend/app/agent/result.py` | 同步与可恢复任务共用的最终答案与政策摘要原文校验。 |
+| `backend/app/agent/checkpoint.py`、`runner.py` | 有版本的检查点与旧格式兼容，安全恢复与停止。 |
+| `backend/app/agent/tracing.py` | LangSmith 元数据回调，关闭自动正文追踪与环境信息附带。 |
+
+五步统计的是模型节点与工具节点的总数。例如“计算，再查询时间”是模型、工具、模型、工具、模型，共五步；不是允许五次工具执行。模型流被暂停后，已经发生的模型调用和步骤也计入预算，恢复不清零。
+
+普通与流式入口均可连续选择工具。模型仍能调用工具时，会先缓冲正文，避免把中间决策或 JSON（结构化数据）参数当成最终回答，因此部分回答的首字等待会增加。明确的纯文本阶段可逐片发送；政策摘要等需要原文校验的回答在校验后发送。
+
+### 启用 LangSmith
+
+在后端环境中配置以下变量；真实密钥只保存在本地环境，不提交到代码仓库：
+
+```dotenv
+LANGSMITH_TRACING=false
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=ai-workspace-agent
+LANGSMITH_ENDPOINT=
+```
+
+需要追踪时，把 `LANGSMITH_TRACING` 改为 `true`，填写平台密钥后重启后端。`LANGSMITH_ENDPOINT` 留空使用官方地址，可填写实际使用区域的平台地址。密钥缺失或追踪初始化失败时，聊天仍然可用。
+
+本次仅提供元数据模式：上传随机请求关联标识、节点与工具名称、耗时、步骤、命中数量和实际返回的用量计数。问题、历史、答案、系统提示词、工具参数和结果、文档、用户身份以及异常原文不会进入追踪载荷。图和模型的自动正文追踪始终禁用；自定义回调在发送前重建允许的字段，真实 SDK 还会关闭自动环境信息收集。传输故障后该次请求停止继续上报，不覆盖业务结果。
+
+同步请求使用请求标识关联；后台线程显式建立追踪上下文，恢复操作产生新的追踪片段，仍使用同一个任务关联标识。MCP 子进程不继承模型和 LangSmith 密钥。
+
+### 暂停恢复与验证边界
+
+新检查点包含版本号，仍能读取旧 OpenAI（模型接口工具包）格式；未知版本安全拒绝。未完成的流式工具参数不会持久化或执行，恢复后重新决策；已经完整保存的待执行调用可继续。
+
+工具结果和检索正文不会写入检查点。恢复时，如果回答仍需要已省略的计算或 MCP 结果，会提示重新发起请求，不重复执行已完成工具。知识检索可以在剩余预算允许时重新获取依据；预算不足则明确结束。模型的恢复生成是新的请求，不保证逐字复现原先尚未发送的文本。
+
+本地框架集成测试使用受控模型 HTTP（网络请求）响应、真实 LangChain 适配器、真实 LangGraph 和真实 MCP 子进程，并检查追踪载荷。它验证集成和安全行为，不代表真实千问服务或 LangSmith 云平台已经联通；真实平台验证需要另行配置可用凭据和网络。
 
 ## 真实 MCP 集成
 

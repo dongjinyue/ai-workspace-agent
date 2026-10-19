@@ -1,3 +1,4 @@
+from tests.model_helpers import as_chat_model
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -139,7 +140,7 @@ def test_agent_selects_and_really_calls_mcp_tool():
         chat=SimpleNamespace(completions=completions)
     )
 
-    with patch("app.agent.nodes._client", return_value=fake_client):
+    with patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)):
         result = run_agent("统计 Hello 和 World 的字符数与行数", None)
 
     assert result.answer == "统计完成"
@@ -158,7 +159,7 @@ def test_agent_safely_degrades_when_mcp_server_becomes_unavailable():
     )
 
     with (
-        patch("app.agent.nodes._client", return_value=fake_client),
+        patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)),
         patch(
             "app.agent.service.MCPClient.call_tool_sync",
             side_effect=MCPClientError("secret internal crash"),

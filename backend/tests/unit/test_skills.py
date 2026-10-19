@@ -1,3 +1,4 @@
+from tests.model_helpers import as_chat_model
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,7 +40,7 @@ def _capture_model_call(state: dict) -> dict:
     fake_client = SimpleNamespace(
         chat=SimpleNamespace(completions=FakeCompletions())
     )
-    with patch("app.agent.nodes._client", return_value=fake_client):
+    with patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)):
         agent_node(state)
     return captured
 

@@ -125,6 +125,7 @@ class ConversationService:
                     history_messages=public_history,
                     allowed_tools=allowed_tools,
                     on_token=on_token,
+                    trace_correlation_id=request_id,
                 )
             except Exception as error:
                 # 未完成轮次不应污染后续上下文；只回滚本次用户消息。
@@ -258,6 +259,7 @@ class ConversationService:
                 checkpoint_callback=checkpoint_callback,
                 status_callback=status_callback,
                 on_token=on_token,
+                trace_correlation_id=run_id,
             )
             duration_ms = round((perf_counter() - request_started) * 1000, 3)
             rag_trace: dict = {

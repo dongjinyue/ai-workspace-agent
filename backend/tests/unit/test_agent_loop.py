@@ -1,3 +1,4 @@
+from tests.model_helpers import as_chat_model
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -61,7 +62,7 @@ def test_agent_loop_can_call_multiple_tools_sequentially():
         for name in ("calculator", "get_current_time")
     ]
     with (
-        patch("app.agent.nodes._client", return_value=fake_client),
+        patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)),
         patch("app.agent.nodes.get_agent_tool_schemas", return_value=schemas),
         patch("app.agent.service.execute_tool", side_effect=fake_execute),
     ):
@@ -90,7 +91,7 @@ def test_invalid_tool_arguments_are_safely_returned_to_model():
         chat=SimpleNamespace(completions=FakeCompletions())
     )
     with (
-        patch("app.agent.nodes._client", return_value=fake_client),
+        patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)),
         patch("app.agent.nodes.get_agent_tool_schemas", return_value=[]),
     ):
         result = run_agent("计算 abc + 1", None)
@@ -139,7 +140,7 @@ def test_knowledge_search_miss_stops_before_second_model_call():
         },
     }
     with (
-        patch("app.agent.nodes._client", return_value=fake_client),
+        patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)),
         patch("app.agent.nodes.get_agent_tool_schemas", return_value=[search_schema]),
         patch(
             "app.agent.service.execute_tool",

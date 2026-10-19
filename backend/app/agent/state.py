@@ -1,10 +1,11 @@
 from typing import Any, Callable, NotRequired, TypedDict
+from langchain_core.messages import BaseMessage
 
 
 class AgentState(TypedDict):
     """LangGraph 各节点共享的运行状态。"""
 
-    messages: list[Any]
+    messages: list[BaseMessage]
     knowledge_base_id: str | None
     conversation_id: str | None
     active_skill: str | None
@@ -24,6 +25,7 @@ class AgentState(TypedDict):
     control_poll: NotRequired[Callable[[], str | None] | None]
     # 暂停前已经输出的回答前缀，用于恢复时合并后续内容。
     paused_answer_prefix: NotRequired[str]
+    omitted_tool_result_ids: NotRequired[list[str]]
     # 节点内部检测到的控制状态，由执行器统一转换成 Run 终态。
     control_status: NotRequired[str | None]
     # 仅用于流式接口传递文本片段，不会写入会话或返回给模型。
