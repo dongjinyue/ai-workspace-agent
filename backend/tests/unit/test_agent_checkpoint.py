@@ -64,7 +64,7 @@ def test_checkpoint_round_trip_keeps_tool_call_but_excludes_sensitive_runtime_da
 
     restored = deserialize_agent_state(serialized)
     tool_call = restored["messages"][1].tool_calls[0]
-    assert tool_call.function.name == "search_knowledge_base"
+    assert tool_call["name"] == "search_knowledge_base"
     assert restored["retrieved_chunks"] == []
     assert "stream_callback" not in restored
     assert restored["next_node"] == "tools"

@@ -6,7 +6,8 @@ from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 
-from openai.types.chat import ChatCompletionMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from app.agent.messages import normalize_messages, dump_messages, load_messages
 
 from app.agent.state import AgentState
 
@@ -29,6 +30,7 @@ _STATE_FIELDS = frozenset(
         "allowed_tools",
         "next_node",
         "paused_answer_prefix",
+        "omitted_tool_result_ids",
     }
 )
 _SECRET_PATTERN = re.compile(
@@ -88,22 +90,29 @@ def _to_json_safe(value: Any, *, key: str | None = None) -> Any:
 
 def serialize_agent_state(state: AgentState) -> str:
     """只序列化 AgentState 的公开可恢复字段，不持久化回调或未知字段。"""
-    safe_state = {}
+    safe_state = {"checkpoint_version": 1}
+    safe_messages = []
+    omitted = set(state.get("omitted_tool_result_ids", []))
+    for message in normalize_messages(state.get("messages", [])):
+        # 重新构造最小消息，剥离 artifact、响应元数据和 SDK 原始字段。
+        if isinstance(message, ToolMessage):
+            omitted.add(message.tool_call_id)
+            safe_messages.append(ToolMessage(content="[工具结果已省略，恢复时重新检索]", tool_call_id=message.tool_call_id))
+        elif isinstance(message, AIMessage):
+            safe_messages.append(AIMessage(content=message.content, tool_calls=message.tool_calls, invalid_tool_calls=message.invalid_tool_calls))
+        elif isinstance(message, HumanMessage):
+            safe_messages.append(HumanMessage(content=message.content))
+        elif isinstance(message, SystemMessage):
+            safe_messages.append(SystemMessage(content=message.content))
+    safe_state["messages"] = _to_json_safe(dump_messages(safe_messages))
+    safe_state["omitted_tool_result_ids"] = sorted(omitted)
     for key, value in state.items():
-        if key not in _STATE_FIELDS:
+        if key not in _STATE_FIELDS or key in {"messages", "omitted_tool_result_ids"}:
             continue
         safe_value = _to_json_safe(value, key=key)
         if safe_value is not _OMIT:
             safe_state[key] = safe_value
     return json.dumps(safe_state, ensure_ascii=False, separators=(",", ":"))
-
-
-def _restore_message(message: Any) -> Any:
-    if not isinstance(message, dict):
-        return message
-    if message.get("role") == "assistant" and message.get("tool_calls"):
-        return ChatCompletionMessage.model_validate(message)
-    return message
 
 
 def deserialize_agent_state(raw: str | dict) -> AgentState:
@@ -113,9 +122,12 @@ def deserialize_agent_state(raw: str | dict) -> AgentState:
     decoded = deepcopy(raw) if isinstance(raw, dict) else json.loads(raw)
     if not isinstance(decoded, dict):
         raise ValueError("检查点必须是 JSON 对象")
-    decoded["messages"] = [
-        _restore_message(message) for message in decoded.get("messages", [])
-    ]
+    version = decoded.pop("checkpoint_version", 0)
+    if type(version) is not int or version not in {0, 1}:
+        raise ValueError("不支持的检查点版本")
+    decoded["messages"] = load_messages(decoded.get("messages", []), version=version)
+    if version == 0:
+        decoded["omitted_tool_result_ids"] = [m.tool_call_id for m in decoded["messages"] if isinstance(m, ToolMessage) and m.content.startswith("[工具结果已省略")]
     if isinstance(decoded.get("allowed_tools"), list):
         decoded["allowed_tools"] = frozenset(decoded["allowed_tools"])
     decoded.setdefault("retrieved_chunks", [])
