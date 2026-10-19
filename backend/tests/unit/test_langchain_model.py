@@ -62,3 +62,35 @@ def test_chat_model_rejects_invalid_timeout(monkeypatch, timeout):
     assert hasattr(llm, "create_chat_model")
     with pytest.raises(RuntimeError, match="MODEL_TIMEOUT_SECONDS"):
         llm.create_chat_model()
+
+
+@pytest.mark.parametrize("status", [401, 429])
+def test_provider_error_is_translated_without_response_body(monkeypatch, status):
+    from app.agent import nodes
+    from app.agent.service import run_agent
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("QWEN_BASE_URL", "https://model.example/v1")
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(status, json={
+        "error": {"message": "private-provider-body", "type": "test_error"}}))) as client:
+        model = llm.create_chat_model(http_client=client)
+        model.max_retries = 0
+        monkeypatch.setattr(nodes, "_client", lambda: model)
+        with pytest.raises(llm.ModelServiceUnavailableError) as error:
+            run_agent("你好", None)
+    assert "private-provider-body" not in str(error.value)
+
+
+def test_provider_timeout_is_translated(monkeypatch):
+    from app.agent import nodes
+    from app.agent.service import run_agent
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.setenv("QWEN_BASE_URL", "https://model.example/v1")
+    def timed_out(request):
+        raise httpx.ReadTimeout("private-timeout", request=request)
+    with httpx.Client(transport=httpx.MockTransport(timed_out)) as client:
+        model = llm.create_chat_model(http_client=client)
+        model.max_retries = 0
+        monkeypatch.setattr(nodes, "_client", lambda: model)
+        with pytest.raises(llm.ModelServiceUnavailableError) as error:
+            run_agent("你好", None)
+    assert "private-timeout" not in str(error.value)

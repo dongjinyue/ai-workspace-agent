@@ -2,10 +2,10 @@
 import json
 from typing import Any
 
-from langchain_core.messages import (
-    AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage,
-    messages_from_dict, messages_to_dict,
+from langchain.messages import (
+    AIMessage, HumanMessage, SystemMessage, ToolMessage,
 )
+from langchain_core.messages import BaseMessage, messages_from_dict, messages_to_dict
 
 
 def _mapping(value: Any) -> dict:

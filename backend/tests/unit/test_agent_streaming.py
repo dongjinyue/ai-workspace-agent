@@ -1,3 +1,4 @@
+from tests.model_helpers import as_chat_model
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -38,11 +39,11 @@ def test_agent_node_forwards_final_text_chunks_to_stream_callback():
         "tool_traces": [],
         "llm_calls": 1,
         "llm_duration_ms": 0,
-        "allowed_tools": None,
+        "allowed_tools": frozenset(),
         "stream_callback": tokens.append,
     }
 
-    with patch("app.agent.nodes._client", return_value=fake_client):
+    with patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)):
         result = agent_node(state)
 
     assert tokens == ["第一", "部分"]
@@ -82,12 +83,12 @@ def test_agent_node_stops_text_stream_at_pause_boundary_and_saves_prefix():
         "tool_traces": [],
         "llm_calls": 1,
         "llm_duration_ms": 0,
-        "allowed_tools": None,
+        "allowed_tools": frozenset(),
         "stream_callback": tokens.append,
         "control_poll": lambda: next(checks, "pause_requested"),
     }
 
-    with patch("app.agent.nodes._client", return_value=fake_client):
+    with patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)):
         result = agent_node(state)
 
     assert tokens == ["第一"]
@@ -129,7 +130,7 @@ def test_agent_node_merges_repository_restored_prefix_before_new_tokens():
         "paused_answer_prefix": "已经输出",
     }
 
-    with patch("app.agent.nodes._client", return_value=fake_client):
+    with patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)):
         result = agent_node(state)
 
     assert len(result["messages"]) == 2

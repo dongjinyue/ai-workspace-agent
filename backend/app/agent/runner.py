@@ -1,7 +1,13 @@
 """支持安全边界暂停、恢复、停止和超时的 Agent 执行器。"""
 
+from contextlib import closing
 from time import monotonic
 from typing import Any, Callable
+from uuid import uuid4
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableConfig
+from app.agent.messages import normalize_messages
+from app.agent.tracing import traced_agent
 
 from app.agent.checkpoint import merge_agent_update
 from app.agent.graph import agent_graph
@@ -51,43 +57,9 @@ class RunControl:
         return status
 
 
-def _message_content(message: Any) -> str | None:
-    if isinstance(message, dict):
-        return message.get("content")
-    return getattr(message, "content", None)
-
-
 def _result_from_state(state: AgentState, status: str):
-    """将公开状态转换成原有 AgentResult，保持普通调用方兼容。"""
-    from app.agent.registry import TOOLS
-    from app.agent.service import AgentResult
-
-    messages = state.get("messages", [])
-    answer = state.get("final_answer")
-    if not answer and messages:
-        answer = _message_content(messages[-1])
-    tools_used = list(state.get("tools_used", []))
-    last_registration = TOOLS.get(tools_used[-1]) if tools_used else None
-    return AgentResult(
-        answer=str(answer or ""),
-        tool_called=bool(tools_used),
-        tool_name=tools_used[-1] if tools_used else None,
-        tools_used=tools_used,
-        active_skill=state.get("active_skill"),
-        steps=state.get("steps", 0),
-        matched_chunks=state.get("matched_chunks", 0),
-        tool_traces=state.get("tool_traces", []),
-        llm_calls=state.get("llm_calls", 0),
-        llm_duration_ms=state.get("llm_duration_ms", 0.0),
-        retrieval_debug=state.get("retrieval_debug", {}),
-        tool_source=last_registration.source if last_registration else None,
-        mcp_server=(
-            last_registration.server
-            if last_registration and last_registration.source == "mcp"
-            else None
-        ),
-        status=status,
-    )
+    from app.agent.result import result_from_state
+    return result_from_state(state, status=status)
 
 
 def _next_node(node_name: str, state: AgentState, node_update: dict[str, Any]) -> str:
@@ -103,6 +75,32 @@ def _next_node(node_name: str, state: AgentState, node_update: dict[str, Any]) -
     raise RuntimeError(f"未知的 Agent 节点：{node_name}")
 
 
+def prepare_resumed_state(state: AgentState) -> AgentState:
+    """结果未持久化时只重取只读检索，不重复计算或外部工具执行。"""
+    state = merge_agent_update(state, {})
+    state.pop("control_status", None)
+    state["messages"] = normalize_messages(state.get("messages", []))
+    omitted = set(state.get("omitted_tool_result_ids", []))
+    if not omitted or state.get("next_node") == "end" or state.get("final_answer"):
+        return state
+    # 答案前缀不是检索依据；恢复后仍需完整工具结果才能继续生成事实。
+    calls = [(index, call) for index, message in enumerate(state["messages"]) if isinstance(message, AIMessage)
+             for call in message.tool_calls if call.get("id") in omitted]
+    if calls and len(calls) == len(omitted) and all(call["name"] == "search_knowledge_base" for _, call in calls):
+        if state["steps"] <= 3:
+            index, call = calls[-1]
+            state["messages"] = [*state["messages"][:index], AIMessage(content="", tool_calls=[{
+                "name": call["name"], "args": call["args"], "id": uuid4().hex}])]
+            state.update(next_node="tools", omitted_tool_result_ids=[], retrieved_chunks=[], paused_answer_prefix="")
+            return state
+        answer = "恢复所需检索依据未保存，剩余执行步数不足，请重新发起请求。"
+    else:
+        answer = "任务恢复所需的工具结果未保存，请重新发起请求。"
+    state.update(next_node="end", final_answer=answer)
+    return state
+
+
+@traced_agent
 def run_resumable_agent(
     initial_state: AgentState,
     *,
@@ -110,9 +108,10 @@ def run_resumable_agent(
     checkpoint_callback: Callable[[AgentState], None],
     status_callback: Callable[[str], None],
     on_token: Callable[[str], None] | None = None,
+    config: RunnableConfig | None = None,
 ):
     """逐节点消费 LangGraph 更新，并在下一节点开始前处理控制信号。"""
-    state = merge_agent_update(initial_state, {})
+    state = prepare_resumed_state(initial_state)
     state["stream_callback"] = on_token
     # 运行时回调只存在于内存中，checkpoint（检查点）序列化会自动排除它。
     state["control_poll"] = control.poll
@@ -132,30 +131,34 @@ def run_resumable_agent(
         if control.check_boundary() == "pause_requested":
             return controlled_result("paused")
         while state.get("next_node") != "end":
-            stream = agent_graph.stream(state, stream_mode="updates")
+            stream = agent_graph.stream(state, stream_mode="updates", **({"config": config} if config else {}))
             yielded = False
-            for output in stream:
-                for node_name, node_update in output.items():
-                    if not isinstance(node_update, dict):
-                        raise RuntimeError("Agent 节点返回了无效状态")
-                    yielded = True
-                    state = merge_agent_update(state, node_update)
-                    control_status = state.get("control_status")
-                    if control_status in {"paused", "stopped", "timed_out"}:
-                        state["next_node"] = "agent" if control_status == "paused" else "end"
-                        return controlled_result(control_status)
-                    state["next_node"] = _next_node(node_name, state, node_update)
-                    checkpoint_callback(state)
-                    if state["next_node"] == "end":
-                        status_callback("completed")
-                        return _result_from_state(state, "completed")
-                    boundary = control.check_boundary()
-                    if boundary == "pause_requested":
-                        return controlled_result("paused")
+            with closing(stream):
+                for output in stream:
+                    for node_name, node_update in output.items():
+                        if not isinstance(node_update, dict):
+                            raise RuntimeError("Agent 节点返回了无效状态")
+                        yielded = True
+                        state = merge_agent_update(state, node_update)
+                        control_status = state.get("control_status")
+                        if control_status in {"paused", "stopped", "timed_out"}:
+                            state["next_node"] = "agent" if control_status == "paused" else "end"
+                            return controlled_result(control_status)
+                        state["next_node"] = _next_node(node_name, state, node_update)
+                        checkpoint_callback(state)
+                        if state["next_node"] == "end":
+                            # 自然耗尽图流，使根追踪正常结束后再返回业务结果。
+                            continue
+                        boundary = control.check_boundary()
+                        if boundary == "pause_requested":
+                            return controlled_result("paused")
             if not yielded:
                 raise RuntimeError("Agent 工作流没有产生节点更新")
         status_callback("completed")
-        return _result_from_state(state, "completed")
+        result = _result_from_state(state, 'completed')
+        if on_token and result.active_skill == 'policy_summary':
+            on_token(result.answer)
+        return result
     except RunCancelled:
         return controlled_result("stopped")
     except RunTimedOut:

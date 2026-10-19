@@ -4,9 +4,12 @@ import re
 from time import perf_counter
 from typing import Any
 
-from openai.types.chat import ChatCompletionMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
+from app.agent.messages import normalize_messages, message_text
+from app.agent.model_response import consume_model_stream
 
-from app.agent.llm import create_llm_client, model_name, translate_model_error
+from app.agent.llm import create_chat_model, translate_model_error
 from app.agent.state import AgentState
 from app.agent.service import get_agent_tool_schemas
 from app.skills.registry import get_skill
@@ -83,16 +86,9 @@ def _has_arithmetic_expression(message: str) -> bool:
 
 def select_required_tool(state: AgentState, available_tools: list[dict]) -> str | None:
     """对明确意图使用确定性路由，避免兼容模型偶发跳过必要 Tool（工具）。"""
-    if state.get("tools_used") or not state.get("knowledge_base_id"):
+    if state.get("tools_used"):
         return None
-    last_user_message = next(
-        (
-            item.get("content", "")
-            for item in reversed(state["messages"])
-            if isinstance(item, dict) and item.get("role") == "user"
-        ),
-        "",
-    )
+    last_user_message = next((message_text(item) for item in reversed(normalize_messages(state["messages"])) if isinstance(item, HumanMessage)), "")
     available_names = {
         item["function"]["name"] for item in available_tools
     }
@@ -121,7 +117,7 @@ def select_required_tool(state: AgentState, available_tools: list[dict]) -> str 
             if "calculate_text_stats" in available_names
             else None
         )
-    if "search_knowledge_base" in available_names and last_user_message.strip():
+    if state.get("knowledge_base_id") and "search_knowledge_base" in available_names and last_user_message.strip():
         return "search_knowledge_base"
     return None
 
@@ -150,272 +146,138 @@ TOOL_RESULT_PROMPT = (
 
 
 def _client():
-    """保留可测试的客户端工厂边界。"""
-    return create_llm_client()
+    """生产只使用 LangChain；保留可注入的测试边界。"""
+    return create_chat_model()
 
 
-def _stream_text_response(
-    client,
-    request: dict[str, Any],
-    on_token,
-    control_poll=None,
-) -> tuple[str, str | None]:
-    """流式传输最终文本，并在每个片段之间响应暂停、停止和超时。"""
-    response = client.chat.completions.create(**request, stream=True)
-    parts: list[str] = []
-    control_status = None
-    try:
-        for chunk in response:
-            # 模型响应是长连接，不能等整个响应结束后才检查控制信号。
-            control_status = control_poll() if control_poll else None
-            if control_status in {"pause_requested", "stopped", "timed_out"}:
-                break
-            # 部分兼容 OpenAI 接口的模型会发送空 choices 数据块（例如结束或用量信息），需要跳过。
-            choices = getattr(chunk, "choices", None) or []
-            if not choices:
-                continue
-            delta = choices[0].delta
-            content = getattr(delta, "content", None)
-            if content:
-                parts.append(content)
-                on_token(content)
-                control_status = control_poll() if control_poll else None
-                if control_status in {"pause_requested", "stopped", "timed_out"}:
-                    break
-    finally:
-        # 尽快关闭上游模型流，避免点击暂停后仍继续消耗模型和网络资源。
-        if control_status in {"pause_requested", "stopped", "timed_out"}:
-            close = getattr(response, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logger.debug("关闭模型流时出现非阻塞异常", exc_info=True)
-    answer = "".join(parts)
-    if not answer and control_status is None:
-        raise RuntimeError("模型没有返回回答或工具调用")
-    return answer, control_status
-
-
-def agent_node(state: AgentState) -> dict[str, Any]:
-    """调用模型，并把模型消息追加到共享状态。"""
+def agent_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
+    """普通与流式决策共享权限、模型和循环逻辑。"""
     if state["steps"] >= MAX_STEPS:
-        return {
-            "steps": state["steps"],
-            "final_answer": "Agent 已达到最大执行步数，工作流已安全停止。",
-        }
-
-    skill = None
+        return {"final_answer": "Agent 已达到最大执行步数，工作流已安全停止。"}
+    messages = normalize_messages(state["messages"])
     system_prompt = SYSTEM_PROMPT
     available_tools = get_agent_tool_schemas()
-    request_tool_allowlist = state.get("allowed_tools")
-    if request_tool_allowlist is not None:
-        available_tools = [
-            schema
-            for schema in available_tools
-            if schema["function"]["name"] in request_tool_allowlist
-        ]
-    if state["active_skill"]:
+    allowed = state.get("allowed_tools")
+    if state.get("active_skill"):
         skill = get_skill(state["active_skill"])
         if skill is None:
-            raise ValueError(f"未注册的技能：{state['active_skill']}")
-        system_prompt = f"{SYSTEM_PROMPT}\n\n{skill.instructions}"
-        available_tools = [
-            schema
-            for schema in available_tools
-            if schema["function"]["name"] in skill.allowed_tools
-        ]
-
-    # perf_counter 使用单调高精度时钟，适合测耗时，不受系统时间调整影响。
-    llm_started = perf_counter()
-    streamed_messages = None
+            raise ValueError("未注册的技能")
+        system_prompt += "\n\n" + skill.instructions
+        allowed = frozenset(skill.allowed_tools) if allowed is None else allowed.intersection(skill.allowed_tools)
+    if allowed is not None:
+        available_tools = [item for item in available_tools if item["function"]["name"] in allowed]
+    required = select_required_tool({**state, "messages": messages}, available_tools)
+    prefix = state.get("paused_answer_prefix", "")
+    last_user = next((message_text(m) for m in reversed(messages) if isinstance(m, HumanMessage)), "")
+    if prefix or _is_greeting(last_user):
+        available_tools, required = [], None
+    callback = state.get("stream_callback")
+    emit = None if state.get("active_skill") == "policy_summary" or prefix else callback
+    started = perf_counter()
+    control_status, partial = None, ""
     try:
-        required_tool = select_required_tool(state, available_tools)
-        client = _client()
-        request = {
-            "model": model_name(),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                *state["messages"],
-            ],
-            "tools": available_tools,
-            "tool_choice": (
-                {
-                    "type": "function",
-                    "function": {"name": required_tool},
-                }
-                if required_tool
-                else "auto"
-            ),
-            "parallel_tool_calls": False,
-            "extra_body": {"enable_thinking": False},
-        }
-        stream_callback = state.get("stream_callback")
-        if stream_callback and required_tool is None:
-            # 确定性路由已经处理了知识库、计算、时间和文本统计等工具问题。
-            # 这里关闭工具调用，只把最终回答按片段传给前端，避免把工具参数半成品展示给用户。
-            request["tools"] = []
-            request["tool_choice"] = "none"
-            answer, control_status = _stream_text_response(
-                client,
-                request,
-                stream_callback,
-                state.get("control_poll"),
-            )
-            prefix = state.get("paused_answer_prefix", "")
-            combined_answer = f"{prefix}{answer}"
-            messages = [*state["messages"]]
-            if combined_answer:
-                partial_message = ChatCompletionMessage(
-                    role="assistant", content=combined_answer
-                )
-                last_role = (
-                    messages[-1].get("role")
-                    if isinstance(messages[-1], dict)
-                    else getattr(messages[-1], "role", None)
-                ) if messages else None
-                if prefix and last_role == "assistant":
-                    messages[-1] = partial_message
-                else:
-                    messages.append(partial_message)
-            if control_status:
-                return {
-                    "messages": messages,
-                    "paused_answer_prefix": combined_answer,
-                    "control_status": {
-                        "pause_requested": "paused",
-                        "stopped": "stopped",
-                        "timed_out": "timed_out",
-                    }[control_status],
-                    "next_node": "agent" if control_status == "pause_requested" else "end",
-                }
-            streamed_messages = messages
-            answer = combined_answer
-            message = ChatCompletionMessage(role="assistant", content=answer)
-            response = None
+        model = _client()
+        if available_tools:
+            choice = {"type": "function", "function": {"name": required}} if required else "auto"
+            model = model.bind_tools(available_tools, tool_choice=choice, parallel_tool_calls=False)
+        request_messages = [SystemMessage(content=system_prompt), *messages]
+        if prefix:
+            request_messages.append(SystemMessage(content="继续未完成的回答，只输出后续内容，不重复已输出的前缀。"))
+        if callback:
+            turn = consume_model_stream(model.stream(request_messages, config=config), on_token=emit,
+                                        control_poll=state.get("control_poll"),
+                                        allow_tools=bool(available_tools), buffer_text=bool(available_tools) or bool(prefix))
+            message, control_status, partial = turn.message, turn.control_status, turn.answer_prefix
         else:
-            response = client.chat.completions.create(**request)
-            message = response.choices[0].message
+            message = model.invoke(request_messages, config=config)
     except Exception as error:
         logger.error("LLM call failed error_type=%s", type(error).__name__)
         translate_model_error(error)
         raise
-    llm_duration_ms = (perf_counter() - llm_started) * 1000
-    if not message.content and not message.tool_calls:
+    update = {"messages": messages, "steps": state["steps"] + 1,
+              "llm_calls": state.get("llm_calls", 0) + 1,
+              "llm_duration_ms": round(state.get("llm_duration_ms", 0) + (perf_counter() - started) * 1000, 3)}
+    if control_status:
+        combined = prefix + partial
+        if combined:
+            if prefix and isinstance(messages[-1], AIMessage):
+                messages[-1] = AIMessage(content=combined)
+            else:
+                messages.append(AIMessage(content=combined))
+        update.update(control_status={"pause_requested": "paused", "stopped": "stopped", "timed_out": "timed_out"}[control_status],
+                      paused_answer_prefix=combined, next_node="agent" if control_status == "pause_requested" else "end")
+        return update
+    if not message.content and not message.tool_calls and not message.invalid_tool_calls:
         raise RuntimeError("模型没有返回回答或工具调用")
-
-    update: dict[str, Any] = {
-        "messages": (
-            streamed_messages
-            if streamed_messages is not None
-            else [*state["messages"], message]
-        ),
-        "steps": state["steps"] + 1,
-        "llm_calls": state.get("llm_calls", 0) + 1,
-        "llm_duration_ms": round(
-            state.get("llm_duration_ms", 0.0) + llm_duration_ms, 3
-        ),
-    }
-    if streamed_messages is not None:
-        update["paused_answer_prefix"] = ""
-    if message.tool_calls and update["steps"] >= MAX_STEPS:
+    if prefix:
+        answer = message_text(message)
+        suffix = answer[len(prefix):] if answer.startswith(prefix) else answer
+        message = AIMessage(content=prefix + suffix)
+        if callback and suffix:
+            callback(suffix)
+        if messages and isinstance(messages[-1], AIMessage):
+            messages.pop()
+    messages.append(message)
+    update["messages"], update["paused_answer_prefix"] = messages, ""
+    if (message.tool_calls or message.invalid_tool_calls) and update["steps"] >= MAX_STEPS:
         update["final_answer"] = "Agent 已达到最大执行步数，工作流已安全停止。"
     return update
 
 
-def tool_node(state: AgentState) -> dict[str, Any]:
-    """通过既有安全执行层运行模型请求的工具。"""
+def tool_node(state: AgentState, config: RunnableConfig | None = None) -> dict[str, Any]:
+    """完整的单个调用经过安全执行层；不执行半成品或多工具响应。"""
     from app.agent.service import execute_tool
-
-    last_message = state["messages"][-1]
-    tool_calls = last_message.tool_calls or []
-    if len(tool_calls) != 1 or len(tool_calls) > MAX_TOOL_CALLS:
+    from app.agent.registry import TOOLS
+    messages = normalize_messages(state["messages"])
+    last = messages[-1]
+    calls = last.tool_calls + last.invalid_tool_calls
+    if len(calls) != 1:
         raise RuntimeError("每轮必须且只能执行一个工具调用")
-
-    tool_call = tool_calls[0]
-    tool_name = tool_call.function.name
-    allowed_tools = state.get("allowed_tools")
-    if state["active_skill"]:
+    call = calls[0]
+    tool_name = call.get("name") or "invalid_tool"
+    allowed = state.get("allowed_tools")
+    if state.get("active_skill"):
         skill = get_skill(state["active_skill"])
         if skill is None:
-            raise ValueError(f"未注册的技能：{state['active_skill']}")
-        skill_tools = frozenset(skill.allowed_tools)
-        allowed_tools = (
-            skill_tools
-            if allowed_tools is None
-            else allowed_tools.intersection(skill_tools)
-        )
-    # Tool（工具）单独计时，便于区分模型慢、检索慢或 MCP 慢。
-    tool_started = perf_counter()
+            raise ValueError("未注册的技能")
+        allowed = frozenset(skill.allowed_tools) if allowed is None else allowed.intersection(skill.allowed_tools)
+    started = perf_counter()
     try:
-        result = execute_tool(
-            tool_name,
-            tool_call.function.arguments,
-            state["knowledge_base_id"],
-            allowed_tools=allowed_tools,
-        )
+        if last.invalid_tool_calls:
+            raise ValueError("无效工具参数")
+        result = execute_tool(tool_name, json.dumps(call["args"], ensure_ascii=False),
+                              state.get("knowledge_base_id"), allowed_tools=allowed, config=config)
     except Exception as error:
-        logger.error(
-            "Tool execution failed tool=%s error_type=%s",
-            tool_name,
-            type(error).__name__,
-        )
-        # 模型偶发生成无效参数时安全降级；具体异常只保留在服务端日志。
+        logger.error("Tool execution failed tool=%s error_type=%s", tool_name, type(error).__name__)
         result = {"error": "工具执行失败：参数无效或工具暂时不可用"}
-    tool_duration_ms = (perf_counter() - tool_started) * 1000
-    from app.agent.service import TOOLS
-
     registration = TOOLS.get(tool_name)
-    # Trace 只保存工具元数据，不保存参数和结果，避免泄露用户或文档内容。
-    tool_trace = {
-        "name": tool_name,
-        "source": registration.source if registration else "unknown",
-        "duration_ms": round(tool_duration_ms, 3),
-    }
+    trace = {"name": tool_name, "source": registration.source if registration else "unknown",
+             "duration_ms": round((perf_counter() - started) * 1000, 3)}
     if registration and registration.server:
-        tool_trace["server"] = registration.server
-    messages = [
-        *state["messages"],
-        {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": json.dumps(result, ensure_ascii=False),
-        },
-        {"role": "system", "content": TOOL_RESULT_PROMPT},
-    ]
-    matched_chunks = (
-        len(result.get("chunks", []))
-        if tool_name == "search_knowledge_base"
-        else 0
-    )
-    final_answer = None
-    if tool_name == "search_knowledge_base" and not result.get("matched"):
-        final_answer = NO_KNOWLEDGE_ANSWER
-
-    return {
-        "messages": messages,
-        "steps": state["steps"] + 1,
-        "tools_used": [*state["tools_used"], tool_name],
-        "matched_chunks": matched_chunks,
-        "retrieved_chunks": result.get("chunks", []),
-        "retrieval_debug": result.get(
-            "retrieval_debug", state.get("retrieval_debug", {})
-        ),
-        "final_answer": final_answer,
-        "tool_traces": [*state.get("tool_traces", []), tool_trace],
-    }
+        trace["server"] = registration.server
+    messages.extend([ToolMessage(content=json.dumps(result, ensure_ascii=False), tool_call_id=call.get("id") or "invalid-call"),
+                     SystemMessage(content=TOOL_RESULT_PROMPT)])
+    matched = len(result.get("chunks", [])) if tool_name == "search_knowledge_base" else state.get("matched_chunks", 0)
+    final_answer = NO_KNOWLEDGE_ANSWER if tool_name == "search_knowledge_base" and not result.get("matched") else None
+    if final_answer is None and state["steps"] + 1 >= MAX_STEPS:
+        # 暂停会改变节点步数的奇偶性，工具节点也可能恰好用完预算。
+        final_answer = "Agent 已达到最大执行步数，工作流已安全停止。"
+    return {"messages": messages, "steps": state["steps"] + 1,
+            "tools_used": [*state["tools_used"], tool_name], "matched_chunks": matched,
+            "retrieved_chunks": result.get("chunks", state.get("retrieved_chunks", [])),
+            "retrieval_debug": result.get("retrieval_debug", state.get("retrieval_debug", {})),
+            "final_answer": final_answer,
+            "tool_traces": [*state.get("tool_traces", []), trace]}
 
 
 def route_after_agent(state: AgentState) -> str:
-    """有工具调用时进入工具节点，否则结束。"""
-    if state.get("final_answer") or state["steps"] >= MAX_STEPS:
+    if state.get("final_answer") or state["steps"] >= MAX_STEPS or state.get("control_status"):
         return "end"
-    last_message = state["messages"][-1]
-    return "tools" if last_message.tool_calls else "end"
+    last = normalize_messages(state["messages"])[-1]
+    return "tools" if last.tool_calls or last.invalid_tool_calls else "end"
 
 
 def route_after_tools(state: AgentState) -> str:
-    """RAG 零命中或达到步数上限时直接结束，否则回到模型。"""
     if state.get("final_answer") or state["steps"] >= MAX_STEPS:
         return "end"
     return "agent"

@@ -1,6 +1,6 @@
 import pytest
 
-from app.agent.llm import create_llm_client, model_name
+from app.agent.llm import create_chat_model, model_name
 
 
 def _disable_proxy_environment(monkeypatch):
@@ -23,8 +23,8 @@ def test_original_qwen_config_is_used(monkeypatch):
     monkeypatch.setenv("QWEN_BASE_URL", "https://dashscope.example")
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-test-key")
 
-    client = create_llm_client()
+    client = create_chat_model()
 
     assert model_name() == "qwen3.8-flash"
-    assert str(client.base_url) == "https://dashscope.example"
-    assert client.api_key == "dashscope-test-key"
+    assert str(client.openai_api_base) == "https://dashscope.example"
+    assert client.openai_api_key.get_secret_value() == "dashscope-test-key"

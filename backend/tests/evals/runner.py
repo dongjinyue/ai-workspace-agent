@@ -1,3 +1,4 @@
+from tests.model_helpers import as_chat_model
 import json
 import os
 import tempfile
@@ -178,7 +179,7 @@ def production_path_predictor(case: dict) -> dict:
         chat=SimpleNamespace(completions=MockLLMCompletions(case["question"]))
     )
     with (
-        patch("app.agent.nodes._client", return_value=fake_client),
+        patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)),
         patch("app.rag.service.embed_texts", _deterministic_embeddings),
     ):
         result = run_agent(case["question"], knowledge_base_id)

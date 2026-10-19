@@ -1,3 +1,5 @@
+from tests.model_helpers import as_chat_model
+from langchain_core.messages import AIMessage
 import json
 from dataclasses import replace
 from types import SimpleNamespace
@@ -54,7 +56,7 @@ def test_guest_model_schema_contains_only_allowlisted_tools():
         )
     )
     state = {
-        "messages": [{"role": "user", "content": "你好"}],
+        "messages": [{"role": "user", "content": "请介绍你的能力"}],
         "knowledge_base_id": None,
         "conversation_id": None,
         "active_skill": None,
@@ -69,7 +71,7 @@ def test_guest_model_schema_contains_only_allowlisted_tools():
         "allowed_tools": allowed,
     }
     with (
-        patch("app.agent.nodes._client", return_value=fake_client),
+        patch("app.agent.nodes._client", return_value=as_chat_model(fake_client)),
         patch(
             "app.agent.nodes.get_agent_tool_schemas",
             return_value=[
@@ -101,7 +103,7 @@ def test_fake_llm_call_cannot_execute_blocked_registered_tool(monkeypatch):
         function=SimpleNamespace(name="get_knowledge_base_info", arguments="{}"),
     )
     state = {
-        "messages": [SimpleNamespace(tool_calls=[tool_call])],
+        "messages": [AIMessage(content="", tool_calls=[{"id": "fake-call", "name": "get_knowledge_base_info", "args": {}}])],
         "knowledge_base_id": "private-base",
         "conversation_id": "conversation",
         "active_skill": None,
@@ -115,7 +117,7 @@ def test_fake_llm_call_cannot_execute_blocked_registered_tool(monkeypatch):
     }
 
     result = tool_node(state)
-    tool_result = json.loads(result["messages"][-2]["content"])
+    tool_result = json.loads(result["messages"][-2].content)
 
     assert called == []
     assert "error" in tool_result
